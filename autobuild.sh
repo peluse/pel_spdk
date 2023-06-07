@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# test
+
 set -e
 
 # If the configuration of tests is not provided, no tests will be carried out.

@@ -1,3 +1,7 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2017 Intel Corporation.
+#  All rights reserved.
+
 from .cmd_parser import *
 
 
@@ -16,6 +20,23 @@ def vhost_controller_set_coalescing(client, ctrlr, delay_base_us, iops_threshold
     return client.call('vhost_controller_set_coalescing', params)
 
 
+def virtio_blk_get_transports(client, name=None):
+    """Get list of virtio-blk transports.
+    Args:
+        name: name of the virtio-blk transport (optional).
+
+    Returns:
+        List of virtio-blk transport objects.
+    """
+
+    params = {}
+
+    if name:
+        params['name'] = name
+
+    return client.call('virtio_blk_get_transports', params)
+
+
 def virtio_blk_create_transport(client, **params):
     """Create virtio blk transport.
     Args:
@@ -27,18 +48,29 @@ def virtio_blk_create_transport(client, **params):
     return client.call('virtio_blk_create_transport', params)
 
 
-def vhost_create_scsi_controller(client, ctrlr, cpumask=None):
+def vhost_create_scsi_controller(client, ctrlr, delay=False, cpumask=None):
     """Create a vhost scsi controller.
     Args:
         ctrlr: controller name
+        delay: whether delay starting controller or not.
         cpumask: cpu mask for this controller
     """
-    params = {'ctrlr': ctrlr}
+    params = {'ctrlr': ctrlr, 'delay': delay}
 
     if cpumask:
         params['cpumask'] = cpumask
 
     return client.call('vhost_create_scsi_controller', params)
+
+
+def vhost_start_scsi_controller(client, ctrlr):
+    """Start a vhost scsi controller.
+    Args:
+        ctrlr: controller name
+    """
+    params = {'ctrlr': ctrlr}
+
+    return client.call('vhost_start_scsi_controller', params)
 
 
 def vhost_scsi_controller_add_target(client, ctrlr, scsi_target_num, bdev_name):
@@ -78,7 +110,6 @@ def vhost_create_blk_controller(client, **params):
         transport: virtio blk transport name (default: vhost_user_blk)
         readonly: set controller as read-only
         packed_ring: support controller packed_ring
-        packed_ring_recovery: enable packed ring live recovery
     """
     strip_globals(params)
     remove_null(params)

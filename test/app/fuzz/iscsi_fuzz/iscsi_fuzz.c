@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2019 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -472,10 +472,6 @@ iscsi_fuzz_read_pdu(struct spdk_iscsi_conn *conn)
 					return 0;
 				}
 			}
-
-			/* All data for this PDU has now been read from the socket. */
-			spdk_trace_record(TRACE_ISCSI_READ_PDU, conn->id, pdu->data_valid_bytes,
-					  (uintptr_t)pdu, pdu->bhs.opcode);
 
 			if (!pdu->is_rejected) {
 				rc = iscsi_fuzz_pdu_payload_handle(conn, pdu);
@@ -1049,6 +1045,7 @@ main(int argc, char **argv)
 
 	spdk_app_opts_init(&opts, sizeof(opts));
 	opts.name = "iscsi_fuzz";
+	opts.rpc_addr = NULL;
 
 	if ((rc = spdk_app_parse_args(argc, argv, &opts, "T:S:t:", NULL, iscsi_fuzz_parse,
 				      iscsi_fuzz_usage) != SPDK_APP_PARSE_ARGS_SUCCESS)) {

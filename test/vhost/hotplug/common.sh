@@ -1,3 +1,8 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2017 Intel Corporation
+#  All rights reserved.
+#
+
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
@@ -134,10 +139,7 @@ function vms_prepare() {
 function vms_reboot_all() {
 	notice "Rebooting all vms "
 	for vm_num in $1; do
-		vm_exec $vm_num "reboot" || true
-		while vm_os_booted $vm_num; do
-			sleep 0.5
-		done
+		VM_SSH_OPTIONS="-oServerAliveInterval=1" vm_exec $vm_num "reboot -f" || true
 	done
 
 	vm_wait_for_boot 300 $1

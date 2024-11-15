@@ -1,5 +1,5 @@
 #  SPDX-License-Identifier: BSD-3-Clause
-#  Copyright (c) Intel Corporation.
+#  Copyright (C) 2015 Intel Corporation.
 #  All rights reserved.
 #
 
@@ -13,7 +13,9 @@ DIRS-y = dynamic
 ifeq (y,$(DPDK_POWER))
 DIRS-y += dpdk_governor gscheduler
 else
+ifneq ($(filter %clean%,$(MAKECMDGOALS)),)
 $(warning Skipping building dpdk_governor and gscheduler, due to missing rte_power)
+endif
 endif
 
 .PHONY: all clean $(DIRS-y)

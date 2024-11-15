@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2017 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -17,6 +17,7 @@
 #include "spdk/util.h"
 #include "spdk/rpc.h"
 #include "spdk/config.h"
+#include "spdk/tree.h"
 
 #define SPDK_VHOST_MAX_VQUEUES	256
 #define SPDK_VHOST_MAX_VQ_SIZE	1024
@@ -37,6 +38,19 @@
 #define SPDK_VHOST_VQ_IOPS_COALESCING_THRESHOLD 60000
 
 /*
+ * Timeout in seconds for vhost-user session stop message.
+ */
+#define SPDK_VHOST_SESSION_STOP_TIMEOUT_IN_SEC 3
+/*
+ * Stop retry timeout in seconds, this value should be greater than SPDK_VHOST_SESSION_STOP_TIMEOUT_IN_SEC.
+ */
+#define SPDK_VHOST_SESSION_STOP_RETRY_TIMEOUT_IN_SEC (SPDK_VHOST_SESSION_STOP_TIMEOUT_IN_SEC + 1)
+/*
+ * Stop retry period in microseconds
+ */
+#define SPDK_VHOST_SESSION_STOP_RETRY_PERIOD_IN_US 1000
+
+/*
  * Currently coalescing is not used by default.
  * Setting this to value > 0 here or by RPC will enable coalescing.
  */
@@ -48,7 +62,6 @@
 	(1ULL << VIRTIO_F_NOTIFY_ON_EMPTY) | \
 	(1ULL << VIRTIO_RING_F_EVENT_IDX) | \
 	(1ULL << VIRTIO_RING_F_INDIRECT_DESC) | \
-	(1ULL << VIRTIO_F_RING_PACKED) | \
 	(1ULL << VIRTIO_F_ANY_LAYOUT))
 
 #define SPDK_VHOST_DISABLED_FEATURES ((1ULL << VIRTIO_RING_F_EVENT_IDX) | \
@@ -114,18 +127,17 @@ struct spdk_vhost_session {
 	/* Unique session name. */
 	char *name;
 
-	bool initialized;
 	bool started;
+	bool starting;
 	bool needs_restart;
-	bool forced_polling;
-	bool interrupt_mode;
-	bool skip_used_signal;
 
 	struct rte_vhost_memory *mem;
 
 	int task_cnt;
 
 	uint16_t max_queues;
+	/* Maximum number of queues before restart, used with 'needs_restart' flag */
+	uint16_t original_max_queues;
 
 	uint64_t negotiated_features;
 
@@ -141,6 +153,17 @@ struct spdk_vhost_session {
 
 	/* Session's stop poller will only try limited times to destroy the session. */
 	uint32_t stop_retry_count;
+
+	/**
+	 * DPDK calls our callbacks synchronously but the work those callbacks
+	 * perform needs to be async. Luckily, all DPDK callbacks are called on
+	 * a DPDK-internal pthread and only related to the current session, so we'll
+	 * just wait on a semaphore of this session in there.
+	 */
+	sem_t dpdk_sem;
+
+	/** Return code for the current DPDK callback */
+	int dpdk_response;
 
 	struct spdk_vhost_virtqueue virtqueue[SPDK_VHOST_MAX_VQUEUES];
 
@@ -158,14 +181,16 @@ struct spdk_vhost_user_dev {
 	uint32_t coalescing_delay_us;
 	uint32_t coalescing_iops_threshold;
 
+	bool registered;
+
+	/* Use this lock to protect multiple sessions. */
+	pthread_mutex_t lock;
+
 	/* Current connections to the device */
 	TAILQ_HEAD(, spdk_vhost_session) vsessions;
 
 	/* Increment-only session counter */
 	uint64_t vsessions_num;
-
-	/* Number of started and actively polled sessions */
-	uint32_t active_session_num;
 
 	/* Number of pending asynchronous operations */
 	uint32_t pending_async_op_num;
@@ -175,21 +200,27 @@ struct spdk_vhost_dev {
 	char *name;
 	char *path;
 
+	bool use_default_cpumask;
 	struct spdk_thread *thread;
-	bool registered;
 
 	uint64_t virtio_features;
 	uint64_t disabled_features;
 	uint64_t protocol_features;
-	bool packed_ring_recovery;
 
 	const struct spdk_vhost_dev_backend *backend;
 
 	/* Context passed from transport */
 	void *ctxt;
 
-	TAILQ_ENTRY(spdk_vhost_dev) tailq;
+	RB_ENTRY(spdk_vhost_dev) node;
 };
+
+static inline struct spdk_vhost_user_dev *
+to_user_dev(struct spdk_vhost_dev *vdev)
+{
+	assert(vdev != NULL);
+	return vdev->ctxt;
+}
 
 /**
  * \param vdev vhost device.
@@ -218,7 +249,9 @@ struct spdk_vhost_user_dev_backend {
 	size_t session_ctx_size;
 
 	spdk_vhost_session_fn start_session;
-	int (*stop_session)(struct spdk_vhost_session *vsession);
+	spdk_vhost_session_fn stop_session;
+	int (*alloc_vq_tasks)(struct spdk_vhost_session *vsession, uint16_t qid);
+	int (*enable_vq)(struct spdk_vhost_session *vsession, struct spdk_vhost_virtqueue *vq);
 };
 
 enum vhost_backend_type {
@@ -236,6 +269,10 @@ struct spdk_vhost_dev_backend {
 	void (*dump_info_json)(struct spdk_vhost_dev *vdev, struct spdk_json_write_ctx *w);
 	void (*write_config_json)(struct spdk_vhost_dev *vdev, struct spdk_json_write_ctx *w);
 	int (*remove_device)(struct spdk_vhost_dev *vdev);
+	int (*set_coalescing)(struct spdk_vhost_dev *vdev, uint32_t delay_base_us,
+			      uint32_t iops_threshold);
+	void (*get_coalescing)(struct spdk_vhost_dev *vdev, uint32_t *delay_base_us,
+			       uint32_t *iops_threshold);
 };
 
 void *vhost_gpa_to_vva(struct spdk_vhost_session *vsession, uint64_t addr, uint64_t len);
@@ -299,14 +336,6 @@ int vhost_inflight_queue_get_desc(struct spdk_vhost_session *vsession,
  *   1 - if interrupt was signalled
  */
 int vhost_vq_used_signal(struct spdk_vhost_session *vsession, struct spdk_vhost_virtqueue *vq);
-
-
-/**
- * Send IRQs for all queues that need to be signaled.
- * \param vsession vhost session
- * \param vq virtqueue
- */
-void vhost_session_used_signal(struct spdk_vhost_session *vsession);
 
 /**
  * Send IRQs for the queue that need to be signaled.
@@ -397,10 +426,12 @@ vhost_dev_has_feature(struct spdk_vhost_session *vsession, unsigned feature_id)
 	return vsession->negotiated_features & (1ULL << feature_id);
 }
 
+int vhost_scsi_controller_start(const char *name);
+
 int vhost_dev_register(struct spdk_vhost_dev *vdev, const char *name, const char *mask_str,
-		       const struct spdk_json_val *params,
-		       const struct spdk_vhost_dev_backend *backend,
-		       const struct spdk_vhost_user_dev_backend *user_backend);
+		       const struct spdk_json_val *params, const struct spdk_vhost_dev_backend *backend,
+		       const struct spdk_vhost_user_dev_backend *user_backend, bool delay);
+
 int vhost_dev_unregister(struct spdk_vhost_dev *vdev);
 
 void vhost_dump_info_json(struct spdk_vhost_dev *vdev, struct spdk_json_write_ctx *w);
@@ -434,49 +465,13 @@ void vhost_user_dev_foreach_session(struct spdk_vhost_dev *dev,
 				    void *arg);
 
 /**
- * Call a function on the provided lcore and block until either
- * vhost_user_session_start_done() or vhost_user_session_stop_done()
- * is called.
- *
- * This must be called under the global vhost mutex, which this function
- * will unlock for the time it's waiting. It's meant to be called only
- * from start/stop session callbacks.
- *
- * \param vsession vhost session
- * \param cb_fn the function to call. The void *arg parameter in cb_fn
- * is always NULL.
- * \param timeout_sec timeout in seconds. This function will still
- * block after the timeout expires, but will print the provided errmsg.
- * \param errmsg error message to print once the timeout expires
- * \return return the code passed to spdk_vhost_session_event_done().
- */
-int vhost_user_session_send_event(struct spdk_vhost_session *vsession,
-				  spdk_vhost_session_fn cb_fn, unsigned timeout_sec,
-				  const char *errmsg);
-
-/**
- * Finish a blocking spdk_vhost_user_session_send_event() call and finally
- * start the session. This must be called on the target lcore, which
- * will now receive all session-related messages (e.g. from
- * vhost_user_dev_foreach_session()).
- *
- * Must be called under the global vhost lock.
- *
- * \param vsession vhost session
- * \param response return code
- */
-void vhost_user_session_start_done(struct spdk_vhost_session *vsession, int response);
-
-/**
- * Finish a blocking spdk_vhost_user_session_send_event() call and finally
+ * Finish a blocking vhost_user_wait_for_session_stop() call and finally
  * stop the session. This must be called on the session's lcore which
  * used to receive all session-related messages (e.g. from
  * vhost_user_dev_foreach_session()). After this call, the session-
  * related messages will be once again processed by any arbitrary thread.
  *
- * Must be called under the global vhost lock.
- *
- * Must be called under the global vhost mutex.
+ * Must be called under the vhost user device's session access lock.
  *
  * \param vsession vhost session
  * \param response return code
@@ -506,11 +501,19 @@ int vhost_user_session_set_coalescing(struct spdk_vhost_dev *dev,
 				      struct spdk_vhost_session *vsession, void *ctx);
 int vhost_user_dev_set_coalescing(struct spdk_vhost_user_dev *user_dev, uint32_t delay_base_us,
 				  uint32_t iops_threshold);
-int vhost_user_dev_register(struct spdk_vhost_dev *vdev, const char *name,
-			    struct spdk_cpuset *cpumask, const struct spdk_vhost_user_dev_backend *user_backend);
+int vhost_user_dev_create(struct spdk_vhost_dev *vdev, const char *name,
+			  struct spdk_cpuset *cpumask,
+			  const struct spdk_vhost_user_dev_backend *user_backend, bool dealy);
+int vhost_user_dev_init(struct spdk_vhost_dev *vdev, const char *name,
+			struct spdk_cpuset *cpumask, const struct spdk_vhost_user_dev_backend *user_backend);
+int vhost_user_dev_start(struct spdk_vhost_dev *vdev);
 int vhost_user_dev_unregister(struct spdk_vhost_dev *vdev);
 int vhost_user_init(void);
 void vhost_user_fini(spdk_vhost_fini_cb vhost_cb);
+int vhost_user_set_coalescing(struct spdk_vhost_dev *vdev, uint32_t delay_base_us,
+			      uint32_t iops_threshold);
+void vhost_user_get_coalescing(struct spdk_vhost_dev *vdev, uint32_t *delay_base_us,
+			       uint32_t *iops_threshold);
 
 int virtio_blk_construct_ctrlr(struct spdk_vhost_dev *vdev, const char *address,
 			       struct spdk_cpuset *cpumask, const struct spdk_json_val *params,
@@ -589,6 +592,18 @@ struct spdk_virtio_blk_transport_ops {
 	 */
 	void (*bdev_event)(enum spdk_bdev_event_type type, struct spdk_vhost_dev *vdev,
 			   bdev_event_cb_complete cb, void *cb_arg);
+
+	/**
+	 * Set coalescing parameters.
+	 */
+	int (*set_coalescing)(struct spdk_vhost_dev *vdev, uint32_t delay_base_us,
+			      uint32_t iops_threshold);
+
+	/**
+	 * Get coalescing parameters.
+	 */
+	void (*get_coalescing)(struct spdk_vhost_dev *vdev, uint32_t *delay_base_us,
+			       uint32_t *iops_threshold);
 };
 
 struct spdk_virtio_blk_transport {
@@ -605,10 +620,16 @@ void virtio_blk_transport_register(const struct spdk_virtio_blk_transport_ops *o
 int virtio_blk_transport_create(const char *transport_name, const struct spdk_json_val *params);
 int virtio_blk_transport_destroy(struct spdk_virtio_blk_transport *transport,
 				 spdk_vhost_fini_cb cb_fn);
-
+struct spdk_virtio_blk_transport *virtio_blk_transport_get_first(void);
+struct spdk_virtio_blk_transport *virtio_blk_transport_get_next(
+	struct spdk_virtio_blk_transport *transport);
+void virtio_blk_transport_dump_opts(struct spdk_virtio_blk_transport *transport,
+				    struct spdk_json_write_ctx *w);
+struct spdk_virtio_blk_transport *virtio_blk_tgt_get_transport(const char *transport_name);
 const struct spdk_virtio_blk_transport_ops *virtio_blk_get_transport_ops(
 	const char *transport_name);
 
+void vhost_session_info_json(struct spdk_vhost_dev *vdev, struct spdk_json_write_ctx *w);
 
 /*
  * Macro used to register new transports.

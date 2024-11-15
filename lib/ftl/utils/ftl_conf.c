@@ -1,11 +1,13 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2022 Intel Corporation.
  *   All rights reserved.
  */
+
 #include "spdk/ftl.h"
 
 #include "ftl_conf.h"
 #include "ftl_core.h"
+#include "ftl_utils.h"
 
 static const struct spdk_ftl_conf g_default_conf = {
 	/* 2 free bands - compaction is blocked, gc only */
@@ -139,6 +141,15 @@ ftl_conf_init_dev(struct spdk_ftl_dev *dev, const struct spdk_ftl_conf *conf)
 	}
 
 	dev->limit = SPDK_FTL_LIMIT_MAX;
+
+	ftl_property_register_bool_rw(dev, "prep_upgrade_on_shutdown", &dev->conf.prep_upgrade_on_shutdown,
+				      "", "During shutdown, FTL executes all actions which "
+				      "are needed for upgrade to a new version", false);
+
+	ftl_property_register_bool_rw(dev, "verbose_mode", &dev->conf.verbose_mode,
+				      "", "In verbose mode, user is able to get access to additional "
+				      "advanced FTL properties", false);
+
 	return 0;
 }
 
@@ -158,6 +169,10 @@ ftl_conf_is_valid(const struct spdk_ftl_conf *conf)
 	}
 
 	if (conf->nv_cache.chunk_free_target == 0 || conf->nv_cache.chunk_free_target > 100) {
+		return false;
+	}
+
+	if (conf->l2p_dram_limit == 0) {
 		return false;
 	}
 

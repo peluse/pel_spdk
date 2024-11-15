@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2015 Intel Corporation.
  *   Copyright (c) 2017, IBM Corporation.
  *   All rights reserved.
  */
@@ -83,6 +83,16 @@ extern "C" {
 #define _spdk_smp_rmb()	__asm__ __volatile__("fence r, r" ::: "memory")
 #define _spdk_smp_wmb()	__asm__ __volatile__("fence w, w" ::: "memory")
 #define _spdk_smp_mb()	__asm__ __volatile__("fence rw, rw" ::: "memory")
+#define _spdk_ivdt_dcache(pdata)
+
+#elif defined(__loongarch__)
+
+#define _spdk_rmb()	__asm volatile("dbar 0" ::: "memory")
+#define _spdk_wmb()	__asm volatile("dbar 0" ::: "memory")
+#define _spdk_mb()	__asm volatile("dbar 0" ::: "memory")
+#define _spdk_smp_rmb()	__asm volatile("dbar 0" ::: "memory")
+#define _spdk_smp_wmb()	__asm volatile("dbar 0" ::: "memory")
+#define _spdk_smp_mb()	__asm volatile("dbar 0" ::: "memory")
 #define _spdk_ivdt_dcache(pdata)
 
 #else

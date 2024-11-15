@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation
+#  All rights reserved.
+#
 
 import socket
 from socket import error as SocketError
@@ -129,7 +133,7 @@ class QMPClient():
 
     def _check_event(self, event, received):
         '''
-        Method for cheking if "received" is the "event" we are waiting for.
+        Method for checking if "received" is the "event" we are waiting for.
         :param event: dictionary description of event, mandatory fields are
                       'event' = QMP name of the event
                       'data' = event specific params in form of a dict.
@@ -194,7 +198,7 @@ class QMPClient():
         :return command exec response or optionally execute result event
         :raise QMPRequestError: on response from QMP server being of error type
         :raise QMPSocketError: on timeout or socket errors
-        :raise QMPError: on id missmatch and JSONdecoder errors
+        :raise QMPError: on id mismatch and JSONdecoder errors
         '''
         cmd_id = self._get_next_exec_id()
         msg = {'execute': cmd, 'id': cmd_id}

@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -32,10 +32,6 @@ DEFINE_STUB(spdk_scsi_lun_get_id,
 	    int,
 	    (const struct spdk_scsi_lun *lun),
 	    0);
-
-DEFINE_STUB_V(spdk_iscsi_op_abort_task_set,
-	      (struct spdk_iscsi_task *task,
-	       uint8_t function));
 
 DEFINE_STUB(spdk_sock_is_ipv6, bool, (struct spdk_sock *sock), false);
 
@@ -765,7 +761,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("iscsi_target_node_suite", NULL, NULL);
@@ -784,9 +779,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, allow_iscsi_name_multi_maps_case);
 	CU_ADD_TEST(suite, chap_param_test_cases);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

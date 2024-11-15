@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2018 Intel Corporation.
  *   All rights reserved.
  *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
@@ -49,6 +49,8 @@ DEFINE_STUB(spdk_json_write_named_uint64, int, (struct spdk_json_write_ctx *w, c
 		uint64_t val), 0);
 DEFINE_STUB(spdk_json_write_named_int64, int, (struct spdk_json_write_ctx *w, const char *name,
 		int64_t val), 0);
+DEFINE_STUB(spdk_json_write_named_uuid, int, (struct spdk_json_write_ctx *w, const char *name,
+		const struct spdk_uuid *uuid), 0);
 DEFINE_STUB(spdk_json_write_named_string, int, (struct spdk_json_write_ctx *w, const char *name,
 		const char *val), 0);
 DEFINE_STUB(spdk_json_write_named_string_fmt, int, (struct spdk_json_write_ctx *w, const char *name,
@@ -60,3 +62,5 @@ DEFINE_STUB(spdk_json_write_named_array_begin, int, (struct spdk_json_write_ctx 
 		const char *name), 0);
 DEFINE_STUB(spdk_json_write_named_object_begin, int, (struct spdk_json_write_ctx *w,
 		const char *name), 0);
+
+DEFINE_STUB(spdk_json_number_to_uint64, int, (const struct spdk_json_val *val, uint64_t *num), 0);

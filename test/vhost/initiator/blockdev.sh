@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2017 Intel Corporation
+#  All rights reserved.
+#
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
@@ -19,7 +22,7 @@ function err_cleanup() {
 
 # start vhost and configure it
 trap 'err_cleanup; exit 1' SIGINT SIGTERM EXIT
-$SPDK_BIN_DIR/vhost -m 0xf &
+$SPDK_BIN_DIR/vhost -m 0xe &
 vhost_pid=$!
 waitforlisten $vhost_pid
 
@@ -35,12 +38,12 @@ rpc_cmd vhost_scsi_controller_add_target naa.Nvme0n1_scsi0.0 0 Nvme0n1p0
 rpc_cmd vhost_scsi_controller_add_target naa.Nvme0n1_scsi0.0 1 Nvme0n1p1
 rpc_cmd vhost_scsi_controller_add_target naa.Nvme0n1_scsi0.0 2 Nvme0n1p2
 rpc_cmd vhost_scsi_controller_add_target naa.Nvme0n1_scsi0.0 3 Nvme0n1p3
-[[ "$(rpc_cmd vhost_get_controllers -n naa.Nvme0n1_scsi0.0 | jq -r '.[].cpumask')" == "0xf" ]]
+[[ "$(rpc_cmd vhost_get_controllers -n naa.Nvme0n1_scsi0.0 | jq -r '.[].cpumask')" == "0xe" ]]
 
-rpc_cmd vhost_create_blk_controller naa.Nvme0n1_blk0.0 Nvme0n1p4 --cpumask 0xf
-[[ "$(rpc_cmd vhost_get_controllers -n naa.Nvme0n1_blk0.0 | jq -r '.[].cpumask')" == "0xf" ]]
-rpc_cmd vhost_create_blk_controller naa.Nvme0n1_blk1.0 Nvme0n1p5 --cpumask 0x1
-[[ "$(rpc_cmd vhost_get_controllers -n naa.Nvme0n1_blk1.0 | jq -r '.[].cpumask')" == "0x1" ]]
+rpc_cmd vhost_create_blk_controller naa.Nvme0n1_blk0.0 Nvme0n1p4 --cpumask 0xe
+[[ "$(rpc_cmd vhost_get_controllers -n naa.Nvme0n1_blk0.0 | jq -r '.[].cpumask')" == "0xe" ]]
+rpc_cmd vhost_create_blk_controller naa.Nvme0n1_blk1.0 Nvme0n1p5 --cpumask 0x4
+[[ "$(rpc_cmd vhost_get_controllers -n naa.Nvme0n1_blk1.0 | jq -r '.[].cpumask')" == "0x4" ]]
 
 rpc_cmd bdev_malloc_create 128 512 --name Malloc0
 rpc_cmd vhost_create_scsi_controller naa.Malloc0.0 --cpumask 0x2
@@ -53,8 +56,8 @@ rpc_cmd vhost_scsi_controller_add_target naa.Malloc1.0 0 Malloc1
 [[ "$(rpc_cmd vhost_get_controllers -n naa.Malloc1.0 | jq -r '.[].cpumask')" == "0xc" ]]
 
 # start a dummy app, create vhost bdevs in it, then dump the config for FIO
-# Pre-allocate 1GB of memory for the application - virtio-user initiator requires it.  See issue #2596.
-$SPDK_BIN_DIR/spdk_tgt -r /tmp/spdk2.sock -g -s 1024 &
+# Pre-allocate 2GB of memory for the application - virtio-user initiator requires it.  See issue #2596.
+$SPDK_BIN_DIR/spdk_tgt -r /tmp/spdk2.sock -g -s 2048 -m 0x1 &
 dummy_spdk_pid=$!
 waitforlisten $dummy_spdk_pid /tmp/spdk2.sock
 rpc_cmd -s /tmp/spdk2.sock bdev_virtio_attach_controller --trtype user --traddr 'naa.Nvme0n1_scsi0.0' -d scsi --vq-count 8 'VirtioScsi0'
@@ -73,7 +76,7 @@ killprocess $dummy_spdk_pid
 
 # run FIO with previously acquired spdk config files
 timing_enter run_spdk_fio
-run_spdk_fio $testdir/bdev.fio --filename=* --section=job_randwrite --spdk_json_conf=$testdir/bdev.json
+run_spdk_fio $testdir/bdev.fio --filename='*' --section=job_randwrite --spdk_json_conf=$testdir/bdev.json
 timing_exit run_spdk_fio
 
 timing_enter run_spdk_fio_unmap

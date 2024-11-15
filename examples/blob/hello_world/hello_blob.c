@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2017 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -433,7 +433,7 @@ main(int argc, char **argv)
 	 */
 	opts.name = "hello_blob";
 	opts.json_config_file = argv[1];
-
+	opts.rpc_addr = NULL;
 
 	/*
 	 * Now we'll allocate and initialize the blobstore itself. We

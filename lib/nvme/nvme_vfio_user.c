@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2020 Intel Corporation. All rights reserved.
  */
 
 /* VFIO transport extensions for spdk_nvme_ctrlr */
@@ -30,6 +30,14 @@ nvme_vfio_ctrlr(struct spdk_nvme_ctrlr *ctrlr)
 	struct nvme_pcie_ctrlr *pctrlr = nvme_pcie_ctrlr(ctrlr);
 
 	return SPDK_CONTAINEROF(pctrlr, struct nvme_vfio_ctrlr, pctrlr);
+}
+
+static volatile struct spdk_nvme_registers *
+nvme_vfio_ctrlr_get_registers(struct spdk_nvme_ctrlr *ctrlr)
+{
+	struct nvme_vfio_ctrlr *vctrlr = nvme_vfio_ctrlr(ctrlr);
+
+	return vctrlr->pctrlr.regs;
 }
 
 static int
@@ -293,8 +301,6 @@ nvme_vfio_ctrlr_destruct(struct spdk_nvme_ctrlr *ctrlr)
 
 	nvme_ctrlr_destruct_finish(ctrlr);
 
-	nvme_ctrlr_free_processes(ctrlr);
-
 	spdk_vfio_user_release(vctrlr->dev);
 	free(vctrlr);
 
@@ -321,6 +327,7 @@ const struct spdk_nvme_transport_ops vfio_ops = {
 	.ctrlr_destruct = nvme_vfio_ctrlr_destruct,
 	.ctrlr_enable = nvme_vfio_ctrlr_enable,
 
+	.ctrlr_get_registers = nvme_vfio_ctrlr_get_registers,
 	.ctrlr_set_reg_4 = nvme_vfio_ctrlr_set_reg_4,
 	.ctrlr_set_reg_8 = nvme_vfio_ctrlr_set_reg_8,
 	.ctrlr_get_reg_4 = nvme_vfio_ctrlr_get_reg_4,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) Intel Corporation
+# Copyright (C) 2021 Intel Corporation
+#
 
 FROM fedora:35 AS base
 
@@ -21,7 +22,7 @@ RUN mkdir -p "$spdk_repo" && \
 	chown -R root:root "$spdk_repo"
 RUN dnf install -y rpm-build
 RUN "$spdk_repo/scripts/pkgdep.sh" -d
-RUN "$spdk_repo/test/common/config/vm_setup.sh" --test-conf=fio
+RUN "$spdk_repo/test/common/config/autotest_setup.sh" --test-conf=fio
 
 # HACK: In case we received a .tar with built SPDK we need to overwrite the
 # configuration to update all the paths make would need to lookup - this is

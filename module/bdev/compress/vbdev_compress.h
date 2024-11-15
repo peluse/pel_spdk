@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2018 Intel Corporation.
  *   All rights reserved.
  *   Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
@@ -13,6 +13,8 @@
 
 #define LB_SIZE_4K	0x1000UL
 #define LB_SIZE_512B	0x200UL
+
+typedef void (*bdev_compress_create_cb)(void *ctx, int status);
 
 /**
  * Get the first compression bdev.
@@ -45,16 +47,6 @@ bool compress_has_orphan(const char *name);
  */
 const char *compress_get_name(const struct vbdev_compress *comp_bdev);
 
-enum compress_pmd {
-	COMPRESS_PMD_AUTO = 0,
-	COMPRESS_PMD_QAT_ONLY,
-	COMPRESS_PMD_ISAL_ONLY,
-	COMPRESS_PMD_MLX5_PCI_ONLY,
-	COMPRESS_PMD_MAX
-};
-
-int compress_set_pmd(enum compress_pmd *opts);
-
 typedef void (*spdk_delete_compress_complete)(void *cb_arg, int bdeverrno);
 
 /**
@@ -63,9 +55,15 @@ typedef void (*spdk_delete_compress_complete)(void *cb_arg, int bdeverrno);
  * \param bdev_name Bdev on which compression bdev will be created.
  * \param pm_path Path to persistent memory.
  * \param lb_size Logical block size for the compressed volume in bytes. Must be 4K or 512.
+ * \param comp_algo compression algorithm for the compressed volume.
+ * \param comp_level compression algorithm level for the compressed volume.
+ * \param cb_fn Function to call after creation.
+ * \param cb_arg Argument to pass to cb_fn.
  * \return 0 on success, other on failure.
  */
-int create_compress_bdev(const char *bdev_name, const char *pm_path, uint32_t lb_size);
+int create_compress_bdev(const char *bdev_name, const char *pm_path, uint32_t lb_size,
+			 uint8_t comp_algo, uint32_t comp_level,
+			 bdev_compress_create_cb cb_fn, void *cb_arg);
 
 /**
  * Delete compress bdev.

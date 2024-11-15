@@ -1,6 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2008-2012 Daisuke Aoyama <aoyama@peach.ne.jp>.
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -19,6 +19,7 @@ struct spdk_iscsi_task {
 	struct spdk_iscsi_conn *conn;
 	struct spdk_iscsi_pdu *pdu;
 	struct spdk_mobj *mobj;
+	uint64_t start_tsc;
 	uint32_t outstanding_r2t;
 
 	uint32_t desired_data_transfer_length;

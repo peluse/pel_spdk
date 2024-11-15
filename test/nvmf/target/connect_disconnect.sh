@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2019 Intel Corporation
+#  All rights reserved.
+#
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
@@ -22,14 +25,15 @@ $rpc_py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t $TEST_TRANSPOR
 
 if [ $RUN_NIGHTLY -eq 1 ]; then
 	num_iterations=100
-	IO_QUEUES="-i 8"
+	# Reduce number of IO queues to shorten connection time
+	NVME_CONNECT="nvme connect -i 8"
 else
-	num_iterations=10
+	num_iterations=5
 fi
 
 set +x
 for i in $(seq 1 $num_iterations); do
-	nvme connect -t $TEST_TRANSPORT -n "nqn.2016-06.io.spdk:cnode1" -a "$NVMF_FIRST_TARGET_IP" -s "$NVMF_PORT" $IO_QUEUES
+	$NVME_CONNECT "${NVME_HOST[@]}" -t $TEST_TRANSPORT -n "nqn.2016-06.io.spdk:cnode1" -a "$NVMF_FIRST_TARGET_IP" -s "$NVMF_PORT"
 	waitforserial "$NVMF_SERIAL"
 	nvme disconnect -n "nqn.2016-06.io.spdk:cnode1"
 	waitforserial_disconnect "$NVMF_SERIAL"

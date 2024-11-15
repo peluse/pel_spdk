@@ -1,3 +1,7 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation.
+#  All rights reserved.
+
 import grpc
 import ipaddress
 import logging
@@ -159,23 +163,25 @@ class VolumeManager:
                                   'Failed to stop discovery')
 
     def _get_crypto_params(self, params):
-        key, cipher, key2 = None, None, None
+        key, cipher, key2, tweak_mode = None, None, None, None
         try:
             if params.HasField('crypto'):
                 key, cipher = params.crypto.key.decode('ascii'), params.crypto.cipher
                 if len(params.crypto.key2) > 0:
                     key2 = params.crypto.key2.decode('ascii')
+                if params.crypto.tweak_mode is not None:
+                    tweak_mode = params.crypto.tweak_mode
         except UnicodeDecodeError:
             raise VolumeException(grpc.StatusCode.INVALID_ARGUMENT,
                                   'Corrupted crypto key')
-        return key, cipher, key2
+        return key, cipher, key2, tweak_mode
 
     def _setup_crypto(self, volume_id, params):
         try:
             if not params.HasField('crypto'):
                 return
-            key, cipher, key2 = self._get_crypto_params(params)
-            crypto.get_crypto_engine().setup(volume_id, key, cipher, key2)
+            key, cipher, key2, tweak_mode = self._get_crypto_params(params)
+            crypto.get_crypto_engine().setup(volume_id, key, cipher, key2, tweak_mode)
         except crypto.CryptoException as ex:
             raise VolumeException(ex.code, ex.message)
 
@@ -187,8 +193,8 @@ class VolumeManager:
 
     def _verify_crypto(self, volume_id, params):
         try:
-            key, cipher, key2 = self._get_crypto_params(params)
-            crypto.get_crypto_engine().verify(volume_id, key, cipher, key2)
+            key, cipher, key2, tweak_mode = self._get_crypto_params(params)
+            crypto.get_crypto_engine().verify(volume_id, key, cipher, key2, tweak_mode)
         except crypto.CryptoException as ex:
             raise VolumeException(ex.code, ex.message)
 
@@ -316,3 +322,9 @@ class VolumeManager:
         volumes = [i for i, v in self._volumes.items() if v.device_handle == device_handle]
         for volume_id in volumes:
             self._disconnect_volume(volume_id)
+
+    @_locked
+    def has_volumes(self, device_handle):
+        """Checks whether a given device has volumes attached to it"""
+        return next(filter(lambda v: v.device_handle == device_handle,
+                           self._volumes.values()), None) is not None

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2020 Intel Corporation
+#  All rights reserved.
+#
 # Install main dependencies
 pacman -Sy --needed --noconfirm gcc make cunit libaio openssl \
-	libutil-linux libiscsi python ncurses json-c cmocka ninja meson
+	libutil-linux libiscsi python ncurses json-c cmocka ninja meson fuse3
 # Additional dependencies for SPDK CLI
 pacman -Sy --needed --noconfirm python-pexpect python-pip libffi
 pip install configshell_fb
@@ -12,6 +15,8 @@ pip install python-magic
 pip install grpcio
 pip install grpcio-tools
 pip install pyyaml
+pip install Jinja2
+pip install tabulate
 # Additional dependencies for DPDK
 pacman -Sy --needed --noconfirm numactl nasm
 # Additional dependencies for ISA-L used in compression
@@ -20,7 +25,7 @@ if [[ $INSTALL_DEV_TOOLS == "true" ]]; then
 	# Tools for developers
 	pacman -Sy --needed --noconfirm git astyle autopep8 \
 		clang sg3_utils pciutils shellcheck bash-completion
-	#fakeroot needed to instal via makepkg
+	#fakeroot needed to install via makepkg
 	pacman -Sy --needed --noconfirm fakeroot
 	su - $SUDO_USER -c "pushd /tmp;
 		git clone https://aur.archlinux.org/perl-perlio-gzip.git;
@@ -49,9 +54,9 @@ if [[ $INSTALL_PMEM == "true" ]]; then
 	ldconfig
 	rm -rf /tmp/pmdk
 fi
-if [[ $INSTALL_FUSE == "true" ]]; then
-	# Additional dependencies for FUSE and NVMe-CUSE
-	pacman -Sy --needed --noconfirm fuse3
+if [[ $INSTALL_RBD == "true" ]]; then
+	echo "Arch Linux does not have librados-devel and librbd-devel in mainline repositories."
+	echo "You can install them manually"
 fi
 if [[ $INSTALL_RDMA == "true" ]]; then
 	# Additional dependencies for RDMA transport in NVMe over Fabrics

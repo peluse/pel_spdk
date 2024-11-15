@@ -1,3 +1,8 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2017 Intel Corporation.
+#  All rights reserved.
+
+
 def iscsi_set_options(
         client,
         auth_file=None,
@@ -166,6 +171,26 @@ def iscsi_get_target_nodes(client):
         List of ISCSI target node objects.
     """
     return client.call('iscsi_get_target_nodes')
+
+
+def iscsi_enable_histogram(client, name, enable):
+    """Enable/disable histogram dynamically for the specified iscsi target node.
+
+    Args:
+        name: name of iscsi target
+    """
+    params = {'name': name, "enable": enable}
+    return client.call('iscsi_enable_histogram', params)
+
+
+def iscsi_get_histogram(client, name):
+    """Get histogram for specified iscsi target.
+
+    Args:
+        name: name of iscsi target
+    """
+    params = {'name': name}
+    return client.call('iscsi_get_histogram', params)
 
 
 def iscsi_create_target_node(
@@ -593,6 +618,15 @@ def iscsi_get_connections(client):
         List of iSCSI connection.
     """
     return client.call('iscsi_get_connections')
+
+
+def iscsi_get_stats(client):
+    """Display stat information of iSCSI connections.
+
+    Returns:
+        Stat information of iSCSI connections.
+    """
+    return client.call('iscsi_get_stats')
 
 
 def iscsi_get_options(client):

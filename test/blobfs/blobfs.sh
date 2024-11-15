@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2019 Intel Corporation
+#  All rights reserved.
+#
 SYSTEM=$(uname -s)
 if [ $SYSTEM = "FreeBSD" ]; then
 	echo "blobfs.sh cannot run on FreeBSD currently."
@@ -92,9 +95,7 @@ function blobfs_fuse_test() {
 
 	# Currently blobfs fuse APP doesn't support specific path of RPC sock.
 	# So directly use default sock path.
-	waitforlisten $blobfs_pid /var/tmp/spdk.sock
-
-	sleep 1
+	waitforlisten $blobfs_pid
 
 	# check mount status
 	mount | grep "$mount_dir"

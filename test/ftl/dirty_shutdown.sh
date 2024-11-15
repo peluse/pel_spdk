@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2019 Intel Corporation
+#  All rights reserved.
+#
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../..)
 source $rootdir/test/common/autotest_common.sh
 source $testdir/common.sh
 
 rpc_py=$rootdir/scripts/rpc.py
+spdk_dd="$SPDK_BIN_DIR/spdk_dd"
 
 while getopts ':u:c:' opt; do
 	case $opt in
@@ -19,8 +23,9 @@ shift $((OPTIND - 1))
 device=$1
 timeout=240
 
+block_size=4096
 chunk_size=262144
-data_size=$((chunk_size * 2))
+data_size=$chunk_size
 
 restore_kill() {
 	rm -f $testdir/config/ftl.json
@@ -36,7 +41,7 @@ restore_kill() {
 
 trap "restore_kill; exit 1" SIGINT SIGTERM EXIT
 
-"$SPDK_BIN_DIR/spdk_tgt" &
+"$SPDK_BIN_DIR/spdk_tgt" -m 0x1 &
 svcpid=$!
 # Wait until spdk_tgt starts
 waitforlisten $svcpid
@@ -67,25 +72,27 @@ $rpc_py nbd_start_disk ftl0 /dev/nbd0
 waitfornbd nbd0
 
 # Write and calculate checksum of the data written
-dd if=/dev/urandom of=$testdir/testfile bs=4K count=$data_size
+$spdk_dd -m 0x2 --if=/dev/urandom --of=$testdir/testfile --bs=$block_size --count=$data_size
 md5sum $testdir/testfile > $testdir/testfile.md5
-dd if=$testdir/testfile of=/dev/nbd0 bs=4K count=$data_size oflag=dsync
+$spdk_dd -m 0x2 --if=$testdir/testfile --of=/dev/nbd0 --bs=$block_size --count=$data_size --oflag=direct
+sync /dev/nbd0
 $rpc_py nbd_stop_disk /dev/nbd0
+$rpc_py bdev_ftl_unload -b ftl0
 
 # Force kill bdev service (dirty shutdown) and start it again
 kill -9 $svcpid
 rm -f /dev/shm/spdk_tgt_trace.pid$svcpid
 
 # Write extra data after restore
-dd if=/dev/urandom of=$testdir/testfile2 bs=4K count=$chunk_size
-"$SPDK_BIN_DIR/spdk_dd" --if=$testdir/testfile2 --ob=ftl0 --count=$chunk_size --seek=$data_size --json=$testdir/config/ftl.json
+$spdk_dd --if=/dev/urandom --of=$testdir/testfile2 --bs=$block_size --count=$chunk_size
+$spdk_dd --if=$testdir/testfile2 --ob=ftl0 --count=$chunk_size --seek=$data_size --json=$testdir/config/ftl.json
 # Save md5 data
 md5sum $testdir/testfile2 > $testdir/testfile2.md5
 
 # Verify that the checksum matches and the data is consistent
-"$SPDK_BIN_DIR/spdk_dd" --ib=ftl0 --of=$testdir/testfile --count=$data_size --json=$testdir/config/ftl.json
+$spdk_dd --ib=ftl0 --of=$testdir/testfile --count=$data_size --json=$testdir/config/ftl.json
 md5sum -c $testdir/testfile.md5
-"$SPDK_BIN_DIR/spdk_dd" --ib=ftl0 --of=$testdir/testfile2 --count=$chunk_size --skip=$data_size --json=$testdir/config/ftl.json
+$spdk_dd --ib=ftl0 --of=$testdir/testfile2 --count=$chunk_size --skip=$data_size --json=$testdir/config/ftl.json
 md5sum -c $testdir/testfile2.md5
 
 trap - SIGINT SIGTERM EXIT

@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2015 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -357,7 +357,7 @@ static int
 ioat_channel_start(struct spdk_ioat_chan *ioat)
 {
 	uint8_t xfercap, version;
-	uint64_t status;
+	uint64_t status = 0;
 	int i, num_descriptors;
 	uint64_t comp_update_bus_addr = 0;
 	uint64_t phys_addr;
@@ -575,7 +575,7 @@ int
 spdk_ioat_build_copy(struct spdk_ioat_chan *ioat, void *cb_arg, spdk_ioat_req_cb cb_fn,
 		     void *dst, const void *src, uint64_t nbytes)
 {
-	struct ioat_descriptor	*last_desc;
+	struct ioat_descriptor	*last_desc = NULL;
 	uint64_t	remaining, op_size;
 	uint64_t	vdst, vsrc;
 	uint64_t	pdst_addr, psrc_addr, dst_len, src_len;

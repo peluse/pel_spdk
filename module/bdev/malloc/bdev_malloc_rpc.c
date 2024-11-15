@@ -1,47 +1,40 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  *   Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "bdev_malloc.h"
 #include "spdk/rpc.h"
-#include "spdk/util.h"
-#include "spdk/uuid.h"
 #include "spdk/string.h"
 #include "spdk/log.h"
 
-struct rpc_construct_malloc {
-	char *name;
-	char *uuid;
-	uint64_t num_blocks;
-	uint32_t block_size;
-	uint32_t optimal_io_boundary;
-};
-
 static void
-free_rpc_construct_malloc(struct rpc_construct_malloc *r)
+free_rpc_construct_malloc(struct malloc_bdev_opts *r)
 {
 	free(r->name);
-	free(r->uuid);
 }
 
 static const struct spdk_json_object_decoder rpc_construct_malloc_decoders[] = {
-	{"name", offsetof(struct rpc_construct_malloc, name), spdk_json_decode_string, true},
-	{"uuid", offsetof(struct rpc_construct_malloc, uuid), spdk_json_decode_string, true},
-	{"num_blocks", offsetof(struct rpc_construct_malloc, num_blocks), spdk_json_decode_uint64},
-	{"block_size", offsetof(struct rpc_construct_malloc, block_size), spdk_json_decode_uint32},
-	{"optimal_io_boundary", offsetof(struct rpc_construct_malloc, optimal_io_boundary), spdk_json_decode_uint32, true},
+	{"name", offsetof(struct malloc_bdev_opts, name), spdk_json_decode_string, true},
+	{"uuid", offsetof(struct malloc_bdev_opts, uuid), spdk_json_decode_uuid, true},
+	{"num_blocks", offsetof(struct malloc_bdev_opts, num_blocks), spdk_json_decode_uint64},
+	{"block_size", offsetof(struct malloc_bdev_opts, block_size), spdk_json_decode_uint32},
+	{"physical_block_size", offsetof(struct malloc_bdev_opts, physical_block_size), spdk_json_decode_uint32, true},
+	{"optimal_io_boundary", offsetof(struct malloc_bdev_opts, optimal_io_boundary), spdk_json_decode_uint32, true},
+	{"md_size", offsetof(struct malloc_bdev_opts, md_size), spdk_json_decode_uint32, true},
+	{"md_interleave", offsetof(struct malloc_bdev_opts, md_interleave), spdk_json_decode_bool, true},
+	{"dif_type", offsetof(struct malloc_bdev_opts, dif_type), spdk_json_decode_int32, true},
+	{"dif_is_head_of_md", offsetof(struct malloc_bdev_opts, dif_is_head_of_md), spdk_json_decode_bool, true},
+	{"dif_pi_format", offsetof(struct malloc_bdev_opts, dif_pi_format), spdk_json_decode_uint32, true},
 };
 
 static void
 rpc_bdev_malloc_create(struct spdk_jsonrpc_request *request,
 		       const struct spdk_json_val *params)
 {
-	struct rpc_construct_malloc req = {NULL};
+	struct malloc_bdev_opts req = {NULL};
 	struct spdk_json_write_ctx *w;
-	struct spdk_uuid *uuid = NULL;
-	struct spdk_uuid decoded_uuid;
 	struct spdk_bdev *bdev;
 	int rc = 0;
 
@@ -54,23 +47,7 @@ rpc_bdev_malloc_create(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	if (req.num_blocks == 0) {
-		spdk_jsonrpc_send_error_response(request, -EINVAL,
-						 "Disk num_blocks must be greater than 0");
-		goto cleanup;
-	}
-
-	if (req.uuid) {
-		if (spdk_uuid_parse(&decoded_uuid, req.uuid)) {
-			spdk_jsonrpc_send_error_response(request, -EINVAL,
-							 "Failed to parse bdev UUID");
-			goto cleanup;
-		}
-		uuid = &decoded_uuid;
-	}
-
-	rc = create_malloc_disk(&bdev, req.name, uuid, req.num_blocks, req.block_size,
-				req.optimal_io_boundary);
+	rc = create_malloc_disk(&bdev, &req);
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
 		goto cleanup;

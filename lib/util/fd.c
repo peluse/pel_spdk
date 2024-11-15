@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2015 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -9,6 +9,10 @@
 
 #ifdef __linux__
 #include <linux/fs.h>
+#endif
+
+#ifdef __FreeBSD__
+#include <sys/disk.h>
 #endif
 
 static uint64_t
@@ -34,7 +38,13 @@ dev_get_size(int fd)
 uint32_t
 spdk_fd_get_blocklen(int fd)
 {
-#if defined(DKIOCGETBLOCKSIZE) /* FreeBSD */
+#if defined(DIOCGSECTORSIZE) /* FreeBSD */
+	uint32_t blocklen;
+
+	if (ioctl(fd, DIOCGSECTORSIZE, &blocklen) == 0) {
+		return blocklen;
+	}
+#elif defined(DKIOCGETBLOCKSIZE)
 	uint32_t blocklen;
 
 	if (ioctl(fd, DKIOCGETBLOCKSIZE, &blocklen) == 0) {

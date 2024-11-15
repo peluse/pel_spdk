@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -320,7 +320,16 @@ io_loop(void)
 	uint64_t next_stats_tsc;
 	int rc;
 
-	tsc_end = spdk_get_ticks() + g_time_in_sec * g_tsc_rate;
+	if (g_time_in_sec > 0) {
+		tsc_end = spdk_get_ticks() + g_time_in_sec * g_tsc_rate;
+	} else {
+		/* User specified 0 seconds for timeout, which means no timeout.
+		 * So just set tsc_end to UINT64_MAX which ensures the loop
+		 * will never time out.
+		 */
+		tsc_end = UINT64_MAX;
+	}
+
 	next_stats_tsc = spdk_get_ticks();
 
 	while (1) {
@@ -370,17 +379,18 @@ io_loop(void)
 			}
 		}
 
+		if (g_insert_times == g_expected_insert_times && g_removal_times == g_expected_removal_times) {
+			break;
+		}
+
 		now = spdk_get_ticks();
 		if (now > tsc_end) {
+			SPDK_ERRLOG("Timing out hotplug application!\n");
 			break;
 		}
 		if (now > next_stats_tsc) {
 			print_stats();
 			next_stats_tsc += g_tsc_rate;
-		}
-
-		if (g_insert_times == g_expected_insert_times && g_removal_times == g_expected_removal_times) {
-			break;
 		}
 	}
 
@@ -403,7 +413,7 @@ usage(char *program_name)
 	printf("\t[-i shm id (optional)]\n");
 	printf("\t[-n expected hot insert times]\n");
 	printf("\t[-r expected hot removal times]\n");
-	printf("\t[-t time in seconds]\n");
+	printf("\t[-t time in seconds to wait for all events (default: forever)]\n");
 	printf("\t[-m iova mode: pa or va (optional)\n");
 	printf("\t[-l log level]\n");
 	printf("\t Available log levels:\n");
@@ -491,11 +501,6 @@ parse_args(int argc, char **argv)
 		}
 	}
 
-	if (!g_time_in_sec) {
-		usage(argv[0]);
-		return 1;
-	}
-
 	return 0;
 }
 
@@ -558,6 +563,7 @@ main(int argc, char **argv)
 		return rc;
 	}
 
+	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
 	opts.name = "hotplug";
 	opts.core_mask = "0x1";
@@ -601,6 +607,7 @@ main(int argc, char **argv)
 	}
 
 cleanup:
+	spdk_rpc_close();
 	spdk_env_fini();
 	return rc;
 }

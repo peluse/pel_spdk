@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2018 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -173,6 +173,17 @@ ftl_reloc_free(struct ftl_reloc *reloc)
 void
 ftl_reloc_halt(struct ftl_reloc *reloc)
 {
+	struct spdk_ftl_dev *dev = reloc->dev;
+
+	if (dev->conf.prep_upgrade_on_shutdown && 0 == dev->num_free) {
+		/*
+		 * In shutdown upgrade procedure, it is required to have
+		 * at least one free band. Keep reloc running to reclaim
+		 * the band.
+		 */
+		return;
+	}
+
 	reloc->halt = true;
 }
 
@@ -568,6 +579,7 @@ move_run(struct ftl_reloc *reloc, struct ftl_reloc_move *mv)
 
 	case FTL_RELOC_STATE_PIN:
 		move_pin(mv);
+		ftl_add_io_activity(reloc->dev);
 		break;
 
 	case FTL_RELOC_STATE_WRITE:
@@ -577,6 +589,7 @@ move_run(struct ftl_reloc *reloc, struct ftl_reloc_move *mv)
 			break;
 		}
 
+		ftl_add_io_activity(reloc->dev);
 		move_write(reloc, mv);
 		break;
 

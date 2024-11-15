@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -10,7 +10,6 @@
 #include "spdk/thread.h"
 
 #include "spdk_internal/init.h"
-#include "spdk/env.h"
 
 static void
 bdev_initialize_complete(void *cb_arg, int rc)
@@ -51,5 +50,7 @@ static struct spdk_subsystem g_spdk_subsystem_bdev = {
 
 SPDK_SUBSYSTEM_REGISTER(g_spdk_subsystem_bdev);
 SPDK_SUBSYSTEM_DEPEND(bdev, accel)
+SPDK_SUBSYSTEM_DEPEND(bdev, keyring)
 SPDK_SUBSYSTEM_DEPEND(bdev, vmd)
 SPDK_SUBSYSTEM_DEPEND(bdev, sock)
+SPDK_SUBSYSTEM_DEPEND(bdev, iobuf)

@@ -1,3 +1,7 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2017 Intel Corporation.
+#  All rights reserved.
+
 import json
 import os
 import sys
@@ -8,24 +12,30 @@ from . import accel
 from . import app
 from . import bdev
 from . import blobfs
+from . import compressdev
+from . import fsdev
 from . import env_dpdk
 from . import dsa
 from . import iaa
 from . import ioat
 from . import iscsi
+from . import keyring
 from . import log
 from . import lvol
 from . import nbd
+from . import ublk
 from . import notify
 from . import nvme
 from . import nvmf
-from . import pmem
 from . import subsystem
 from . import trace
 from . import vhost
 from . import vmd
 from . import sock
 from . import vfio_user
+from . import iobuf
+from . import dpdk_cryptodev
+from . import mlx5
 from . import client as rpc_client
 
 
@@ -37,6 +47,16 @@ def framework_start_init(client):
 def framework_wait_init(client):
     """Block until subsystems have been initialized"""
     return client.call('framework_wait_init')
+
+
+def framework_disable_cpumask_locks(client):
+    """ Disable CPU core lock files."""
+    return client.call('framework_disable_cpumask_locks')
+
+
+def framework_enable_cpumask_locks(client):
+    """ Enable CPU core lock files."""
+    return client.call('framework_enable_cpumask_locks')
 
 
 def rpc_get_methods(client, current=None, include_aliases=None):
@@ -80,18 +100,40 @@ def _json_load(j):
     return json_conf
 
 
-def save_config(client, fd, indent=2):
+def save_config(client, fd, indent=2, subsystems=None):
     """Write current (live) configuration of SPDK subsystems and targets to stdout.
     Args:
         fd: opened file descriptor where data will be saved
         indent: Indent level. Value less than 0 mean compact mode.
             Default indent level is 2.
+        subsystems: subsystems (and their dependencies) to save
     """
     config = {
         'subsystems': []
     }
 
-    for elem in client.call('framework_get_subsystems'):
+    subsystems_json = client.call('framework_get_subsystems')
+
+    # Build a dictionary of all subsystems to their fully expanded set of
+    # dependencies.
+    dependencies = dict()
+    for elem in subsystems_json:
+        subsystem = elem['subsystem']
+        dependencies[subsystem] = {subsystem}
+        for d in elem['depends_on']:
+            dependencies[subsystem].update(dependencies[d])
+
+    # Build a set of all of the subsystems to print based on the
+    # subsystems parameter.
+    to_print = set()
+    if subsystems is None:
+        to_print = dependencies.keys()
+    else:
+        for s in subsystems.split(','):
+            to_print.update(dependencies[s])
+
+    def _print(x): return x['subsystem'] in to_print
+    for elem in filter(_print, subsystems_json):
         cfg = {
             'subsystem': elem['subsystem'],
             'config': client.call('framework_get_config', {"name": elem['subsystem']})

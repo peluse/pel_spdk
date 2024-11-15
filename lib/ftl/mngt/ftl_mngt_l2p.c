@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2022 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -53,9 +53,9 @@ ftl_mngt_persist_l2p(struct spdk_ftl_dev *dev, struct ftl_mngt_process *mngt)
 }
 
 void
-ftl_mngt_unmap_l2p(struct spdk_ftl_dev *dev, struct ftl_mngt_process *mngt)
+ftl_mngt_trim_l2p(struct spdk_ftl_dev *dev, struct ftl_mngt_process *mngt)
 {
-	ftl_l2p_unmap(dev, l2p_cb, mngt);
+	ftl_l2p_trim(dev, l2p_cb, mngt);
 }
 
 void

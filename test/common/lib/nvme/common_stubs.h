@@ -1,8 +1,9 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2020 Intel Corporation.
  *   All rights reserved.
  *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
+
 #include "common/lib/test_env.c"
 
 const char *
@@ -92,6 +93,9 @@ DEFINE_STUB(nvme_fabric_qpair_connect, int, (struct spdk_nvme_qpair *qpair, uint
 DEFINE_STUB(nvme_fabric_qpair_connect_async, int, (struct spdk_nvme_qpair *qpair,
 		uint32_t num_entries), 0);
 DEFINE_STUB(nvme_fabric_qpair_connect_poll, int, (struct spdk_nvme_qpair *qpair), 0);
+DEFINE_STUB(nvme_fabric_qpair_auth_required, bool, (struct spdk_nvme_qpair *qpair), false);
+DEFINE_STUB(nvme_fabric_qpair_authenticate_async, int, (struct spdk_nvme_qpair *qpair), 0);
+DEFINE_STUB(nvme_fabric_qpair_authenticate_poll, int, (struct spdk_nvme_qpair *qpair), 0);
 DEFINE_STUB_V(nvme_transport_ctrlr_disconnect_qpair, (struct spdk_nvme_ctrlr *ctrlr,
 		struct spdk_nvme_qpair *qpair));
 DEFINE_STUB(nvme_poll_group_disconnect_qpair, int, (struct spdk_nvme_qpair *qpair), 0);
@@ -110,4 +114,29 @@ nvme_qpair_init(struct spdk_nvme_qpair *qpair, uint16_t id,
 	qpair->poll_group = (void *)0xDEADBEEF;
 
 	return 0;
+}
+
+int
+nvme_parse_addr(struct sockaddr_storage *sa, int family, const char *addr, const char *service,
+		long int *port)
+{
+	struct addrinfo *res;
+	struct addrinfo hints;
+	int rc;
+
+	SPDK_CU_ASSERT_FATAL(service != NULL);
+	*port = spdk_strtol(service, 10);
+	if (*port <= 0 || *port >= 65536) {
+		return -EINVAL;
+	}
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = family;
+	hints.ai_socktype = SOCK_STREAM;
+
+	rc = getaddrinfo(addr, service, &hints, &res);
+	if (rc == 0) {
+		freeaddrinfo(res);
+	}
+	return rc;
 }

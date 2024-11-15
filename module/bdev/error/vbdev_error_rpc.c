@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2017 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -7,45 +7,58 @@
 #include "spdk/string.h"
 #include "spdk/rpc.h"
 #include "spdk/util.h"
-#include "spdk/string.h"
 #include "spdk/log.h"
 #include "vbdev_error.h"
 
-#define ERROR_BDEV_IO_TYPE_INVALID (SPDK_BDEV_IO_TYPE_RESET + 1)
-#define ERROR_BDEV_ERROR_TYPE_INVALID (VBDEV_IO_PENDING + 1)
-
-static uint32_t
-rpc_error_bdev_io_type_parse(char *name)
+static int
+rpc_error_bdev_decode_io_type(const struct spdk_json_val *val, void *out)
 {
-	if (strcmp(name, "read") == 0) {
-		return SPDK_BDEV_IO_TYPE_READ;
-	} else if (strcmp(name, "write") == 0) {
-		return SPDK_BDEV_IO_TYPE_WRITE;
-	} else if (strcmp(name, "flush") == 0) {
-		return SPDK_BDEV_IO_TYPE_FLUSH;
-	} else if (strcmp(name, "unmap") == 0) {
-		return SPDK_BDEV_IO_TYPE_UNMAP;
-	} else if (strcmp(name, "all") == 0) {
-		return 0xffffffff;
-	} else if (strcmp(name, "clear") == 0) {
-		return 0;
+	uint32_t *io_type = out;
+
+	if (spdk_json_strequal(val, "read") == true) {
+		*io_type = SPDK_BDEV_IO_TYPE_READ;
+	} else if (spdk_json_strequal(val, "write") == true) {
+		*io_type = SPDK_BDEV_IO_TYPE_WRITE;
+	} else if (spdk_json_strequal(val, "flush") == true) {
+		*io_type = SPDK_BDEV_IO_TYPE_FLUSH;
+	} else if (spdk_json_strequal(val, "unmap") == true) {
+		*io_type = SPDK_BDEV_IO_TYPE_UNMAP;
+	} else if (spdk_json_strequal(val, "all") == true) {
+		*io_type = 0xffffffff;
+	} else if (spdk_json_strequal(val, "clear") == true) {
+		*io_type = 0;
+	} else {
+		SPDK_NOTICELOG("Invalid parameter value: io_type\n");
+		return -EINVAL;
 	}
-	return ERROR_BDEV_IO_TYPE_INVALID;
+
+	return 0;
 }
 
-static uint32_t
-rpc_error_bdev_error_type_parse(char *name)
+static int
+rpc_error_bdev_decode_error_type(const struct spdk_json_val *val, void *out)
 {
-	if (strcmp(name, "failure") == 0) {
-		return VBDEV_IO_FAILURE;
-	} else if (strcmp(name, "pending") == 0) {
-		return VBDEV_IO_PENDING;
+	uint32_t *error_type = out;
+
+	if (spdk_json_strequal(val, "failure") == true) {
+		*error_type = VBDEV_IO_FAILURE;
+	} else if (spdk_json_strequal(val, "pending") == true) {
+		*error_type = VBDEV_IO_PENDING;
+	} else if (spdk_json_strequal(val, "corrupt_data") == true) {
+		*error_type = VBDEV_IO_CORRUPT_DATA;
+	} else if (spdk_json_strequal(val, "nomem") == true) {
+		*error_type = VBDEV_IO_NOMEM;
+	} else {
+		SPDK_NOTICELOG("Invalid parameter value: error_type\n");
+		return -EINVAL;
 	}
-	return ERROR_BDEV_ERROR_TYPE_INVALID;
+
+	return 0;
 }
 
 struct rpc_bdev_error_create {
 	char *base_name;
+	struct spdk_uuid uuid;
 };
 
 static void
@@ -56,6 +69,7 @@ free_rpc_bdev_error_create(struct rpc_bdev_error_create *req)
 
 static const struct spdk_json_object_decoder rpc_bdev_error_create_decoders[] = {
 	{"base_name", offsetof(struct rpc_bdev_error_create, base_name), spdk_json_decode_string},
+	{"uuid", offsetof(struct rpc_bdev_error_create, uuid), spdk_json_decode_uuid, true},
 };
 
 static void
@@ -74,7 +88,7 @@ rpc_bdev_error_create(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	rc = vbdev_error_create(req.base_name);
+	rc = vbdev_error_create(req.base_name, &req.uuid);
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
 		goto cleanup;
@@ -136,33 +150,30 @@ SPDK_RPC_REGISTER("bdev_error_delete", rpc_bdev_error_delete, SPDK_RPC_RUNTIME)
 
 struct rpc_error_information {
 	char *name;
-	char *io_type;
-	char *error_type;
-	uint32_t num;
+	struct vbdev_error_inject_opts opts;
 };
 
 static const struct spdk_json_object_decoder rpc_error_information_decoders[] = {
 	{"name", offsetof(struct rpc_error_information, name), spdk_json_decode_string},
-	{"io_type", offsetof(struct rpc_error_information, io_type), spdk_json_decode_string},
-	{"error_type", offsetof(struct rpc_error_information, error_type), spdk_json_decode_string},
-	{"num", offsetof(struct rpc_error_information, num), spdk_json_decode_uint32, true},
+	{"io_type", offsetof(struct rpc_error_information, opts.io_type), rpc_error_bdev_decode_io_type},
+	{"error_type", offsetof(struct rpc_error_information, opts.error_type), rpc_error_bdev_decode_error_type},
+	{"num", offsetof(struct rpc_error_information, opts.error_num), spdk_json_decode_uint32, true},
+	{"queue_depth", offsetof(struct rpc_error_information, opts.error_qd), spdk_json_decode_uint64, true},
+	{"corrupt_offset", offsetof(struct rpc_error_information, opts.corrupt_offset), spdk_json_decode_uint64, true},
+	{"corrupt_value", offsetof(struct rpc_error_information, opts.corrupt_value), spdk_json_decode_uint8, true},
 };
 
 static void
 free_rpc_error_information(struct rpc_error_information *p)
 {
 	free(p->name);
-	free(p->io_type);
-	free(p->error_type);
 }
 
 static void
 rpc_bdev_error_inject_error(struct spdk_jsonrpc_request *request,
 			    const struct spdk_json_val *params)
 {
-	struct rpc_error_information req = {.num = 1};
-	uint32_t io_type;
-	uint32_t error_type;
+	struct rpc_error_information req = {.opts.error_num = 1};
 	int rc = 0;
 
 	if (spdk_json_decode_object(params, rpc_error_information_decoders,
@@ -174,21 +185,7 @@ rpc_bdev_error_inject_error(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	io_type = rpc_error_bdev_io_type_parse(req.io_type);
-	if (io_type == ERROR_BDEV_IO_TYPE_INVALID) {
-		spdk_jsonrpc_send_error_response(request, -EINVAL,
-						 "Unexpected io_type value");
-		goto cleanup;
-	}
-
-	error_type = rpc_error_bdev_error_type_parse(req.error_type);
-	if (error_type == ERROR_BDEV_ERROR_TYPE_INVALID) {
-		spdk_jsonrpc_send_error_response(request, -EINVAL,
-						 "Unexpected error_type value");
-		goto cleanup;
-	}
-
-	rc = vbdev_error_inject_error(req.name, io_type, error_type, req.num);
+	rc = vbdev_error_inject_error(req.name, &req.opts);
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
 		goto cleanup;

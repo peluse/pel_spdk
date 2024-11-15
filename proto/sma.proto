@@ -11,7 +11,7 @@ import "nvmf.proto";
 
 package sma;
 
-option go_package = "spdk.io/sma";
+option go_package = "github.com/spdk/sma-goapi/v1alpha1";
 
 // Enumeration defining types of devices
 enum DeviceType {
@@ -33,6 +33,26 @@ message VolumeCryptoParameters {
   }
   // Cipher to use
   Cipher cipher = 3;
+  // Tweak mode - determine how nvme LBA is converted into tweak
+  enum TweakMode {
+    // default for SPDK bdev_crypto
+    // Tweak[127:0] = {64'b0, LBA[63:0]}
+    TWEAK_MODE_SIMPLE_LBA = 0;
+
+    // Tweak[127:0] = {1’b0, ~LBA[62:0], LBA[63:0]}
+    TWEAK_MODE_JOIN_NEG_LBA_WITH_LBA = 1;
+
+    // tweak is derived from nvme LBA that is internally incremented by 1 for every 512 bytes processed
+    // so initial lba = (BLOCK_SIZE_IN_BYTES / 512) * LBA
+    // Tweak[127:0] = {lba[127:0]}
+    TWEAK_MODE_INCR_512_FULL_LBA = 2;
+
+    // tweak is derived from nvme LBA that is internally incremented by 1 for every 512 bytes processed
+    // so initial lba = (BLOCK_SIZE_IN_BYTES / 512) * LBA
+    // Tweak[127:0] = {lba[63:0], 64'b0}
+    TWEAK_MODE_INCR_512_UPPER_LBA = 3;
+  }
+  TweakMode tweak_mode = 4;
 }
 
 // Parameters describing a volume
@@ -172,7 +192,10 @@ service StorageManagementAgent {
   // volumes (e.g. an NVMeoF subsystem).
   rpc CreateDevice (CreateDeviceRequest)
     returns (CreateDeviceResponse) {}
-  // Deletes a device
+  // Deletes a device.  It is only allowed to delete a device with volumes still
+  // attached if that device doesn't support attaching volumes through
+  // AttachVolume (e.g. virtio-blk).   In other cases, it is forbidden and
+  // FAILED_PRECONDITION status will be returned.
   rpc DeleteDevice (DeleteDeviceRequest)
     returns (DeleteDeviceResponse) {}
   // Attaches a volume to a specified device making it available through that

@@ -1,5 +1,5 @@
 #  SPDX-License-Identifier: BSD-3-Clause
-#  Copyright (c) Intel Corporation.
+#  Copyright (C) 2018 Intel Corporation.
 #  All rights reserved.
 #
 
@@ -8,7 +8,7 @@ include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 include $(SPDK_ROOT_DIR)/mk/spdk.app.mk
 include $(SPDK_ROOT_DIR)/mk/spdk.modules.mk
 
-SO_VER := 4
+SO_VER := 6
 SO_MINOR := 0
 SO_SUFFIX := $(SO_VER).$(SO_MINOR)
 

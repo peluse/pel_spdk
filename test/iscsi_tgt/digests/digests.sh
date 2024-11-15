@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2018 Intel Corporation
+#  All rights reserved.
+#
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
@@ -9,7 +12,7 @@ iscsitestinit
 
 function node_login_fio_logout() {
 	for arg in "$@"; do
-		iscsiadm -m node -p $TARGET_IP:$ISCSI_PORT -o update -n node.conn[0].iscsi.$arg
+		iscsiadm -m node -p $TARGET_IP:$ISCSI_PORT -o update -n "node.conn[0].iscsi".$arg
 	done
 	iscsiadm -m node --login -p $TARGET_IP:$ISCSI_PORT
 	waitforiscsidevices 1
@@ -77,7 +80,7 @@ iscsiadm -m discovery -t sendtargets -p $TARGET_IP:$ISCSI_PORT
 
 # iscsiadm installed by some Fedora releases loses the ability to set DataDigest parameter.
 # Check and avoid setting DataDigest.
-DataDigestAbility=$(iscsiadm -m node -p $TARGET_IP:$ISCSI_PORT -o update -n node.conn[0].iscsi.DataDigest -v None 2>&1 || true)
+DataDigestAbility=$(iscsiadm -m node -p $TARGET_IP:$ISCSI_PORT -o update -n "node.conn[0].iscsi.DataDigest" -v None 2>&1 || true)
 if [ "$DataDigestAbility"x != x ]; then
 	run_test "iscsi_tgt_digest" iscsi_header_digest_test
 else

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation
+#  All rights reserved.
+#
 testdir=$(readlink -f "$(dirname "$0")")
 rootdir=$(readlink -f "$testdir/../..")
 
@@ -44,6 +47,8 @@ function delete_device() {
 trap "cleanup; exit 1" SIGINT SIGTERM EXIT
 
 vm_no=0
+bus_size=32
+
 timing_enter setup_vm
 vm_setup \
 	--force=$vm_no \
@@ -55,8 +60,17 @@ vm_run $vm_no
 vm_wait_for_boot 300 $vm_no
 timing_exit setup_vm
 
-$rootdir/build/bin/vhost -S /var/tmp -m 0x3 &
+$rootdir/build/bin/vhost -S /var/tmp -m 0x3 --wait-for-rpc &
 vhostpid=$!
+
+waitforlisten $vhostpid
+
+# Configure accel crypto module & operations
+rpc_cmd dpdk_cryptodev_scan_accel_module
+rpc_cmd dpdk_cryptodev_set_driver -d crypto_aesni_mb
+rpc_cmd accel_assign_opc -o encrypt -m dpdk_cryptodev
+rpc_cmd accel_assign_opc -o decrypt -m dpdk_cryptodev
+rpc_cmd framework_start_init
 
 $rootdir/scripts/sma.py -c <(
 	cat <<- EOF
@@ -67,15 +81,13 @@ $rootdir/scripts/sma.py -c <(
 		    params:
 		      buses:
 		      - name: 'pci.spdk.0'
-		        count: 32
+		        count: $bus_size
 		      - name: 'pci.spdk.1'
-		        count: 32
+		        count: $bus_size
 		      qmp_addr: 127.0.0.1
 		      qmp_port: 9090
 		crypto:
 		  name: 'bdev_crypto'
-		  params:
-		    driver: 'crypto_aesni_mb'
 	EOF
 ) &
 smapid=$!
@@ -128,31 +140,26 @@ delete_device "$devid1"
 NOT rpc_cmd vhost_get_controllers -n sma-1
 [[ $(rpc_cmd vhost_get_controllers | jq -r '. | length') -eq 0 ]]
 
-# Finally check that removing a non-existing device is also sucessful
+# Finally check that removing a non-existing device is also successful
 delete_device "$devid0"
 delete_device "$devid1"
 
 # At the end check if vhost devices are gone
 [[ $(vm_exec $vm_no "lsblk | grep -E \"^vd.\" | wc -l") -eq 0 ]]
 
-# Create 62 bdevs, two already exist
-for ((i = 2; i < 64; i++)); do
-	rpc_cmd bdev_null_create null$i 100 4096
-done
-
 devids=()
 
-# Not try to add 64 devices, max for two buses
-for ((i = 0; i < 64; i++)); do
-	uuid=$(rpc_cmd bdev_get_bdevs -b null$i | jq -r '.[].uuid')
-	devids[$i]=$(create_device $i $uuid | jq -r '.handle')
-done
+# Create two devices, one on each bus
+uuid=$(rpc_cmd bdev_get_bdevs -b null0 | jq -r '.[].uuid')
+devids[0]=$(create_device 0 $uuid | jq -r '.handle')
+uuid=$(rpc_cmd bdev_get_bdevs -b null1 | jq -r '.[].uuid')
+devids[1]=$(create_device $bus_size $uuid | jq -r '.handle')
 
-[[ $(vm_exec $vm_no "lsblk | grep -E \"^vd.\" | wc -l") -eq 64 ]]
+[[ $(vm_exec $vm_no "lsblk | grep -E \"^vd.\" | wc -l") -eq 2 ]]
 
 # Cleanup at the end
-for ((i = 0; i < 64; i++)); do
-	delete_device ${devids[$i]}
+for id in "${devids[@]}"; do
+	delete_device "$id"
 done
 
 # And back to none
@@ -160,9 +167,9 @@ done
 
 key0=1234567890abcdef1234567890abcdef
 rpc_cmd bdev_malloc_create -b malloc0 32 4096
-uuidc=$(rpc_cmd bdev_get_bdevs -b malloc0 | jq -r '.[].uuid')
+uuid=$(rpc_cmd bdev_get_bdevs -b malloc0 | jq -r '.[].uuid')
 
-#Try to create controller with bdev crypto
+# Try to create controller with bdev crypto
 devid0=$(
 	"$rootdir/scripts/sma-client.py" <<- CREATE | jq -r '.handle'
 		{
@@ -173,7 +180,7 @@ devid0=$(
 		      "virtual_id": "0"
 		    },
 		    "volume": {
-		      "volume_id": "$(uuid2base64 $uuidc)",
+		      "volume_id": "$(uuid2base64 $uuid)",
 		      "crypto": {
 		        "cipher": "$(get_cipher AES_CBC)",
 		        "key": "$(format_key $key0)"
@@ -188,8 +195,11 @@ devid0=$(
 bdev=$(rpc_cmd vhost_get_controllers | jq -r '.[].backend_specific.block.bdev')
 
 crypto_bdev=$(rpc_cmd bdev_get_bdevs | jq -r '.[] | select(.product_name == "crypto")')
-[[ $(jq -r '.driver_specific.crypto.key' <<< "$crypto_bdev") == "$key0" ]]
 [[ $(jq -r '.driver_specific.crypto.name' <<< "$crypto_bdev") == "$bdev" ]]
+key_name=$(jq -r '.driver_specific.crypto.key_name' <<< "$crypto_bdev")
+key_obj=$(rpc_cmd accel_crypto_keys_get -k $key_name)
+[[ $(jq -r '.[0].key' <<< "$key_obj") == "$key0" ]]
+[[ $(jq -r '.[0].cipher' <<< "$key_obj") == "AES_CBC" ]]
 
 # Delete crypto device and check if it's gone
 delete_device $devid0
@@ -197,12 +207,19 @@ delete_device $devid0
 
 # Test qos
 device_vhost=2
+uuid=$(rpc_cmd bdev_get_bdevs -b null0 | jq -r '.[].uuid')
 device=$(create_device 0 $uuid | jq -r '.handle')
 
 # First check the capabilities
 diff <(get_qos_caps $device_vhost | jq --sort-keys) <(
 	jq --sort-keys <<- CAPS
 		{
+		  "max_device_caps": {
+		    "rw_iops": true,
+		    "rd_bandwidth": true,
+		    "wr_bandwidth": true,
+		    "rw_bandwidth": true
+		  },
 		  "max_volume_caps": {
 		    "rw_iops": true,
 		    "rd_bandwidth": true,
@@ -232,7 +249,7 @@ diff <(get_qos_caps $device_vhost | jq --sort-keys) <(
 EOF
 
 # Make sure that limits were changed
-diff <(rpc_cmd bdev_get_bdevs -b null63 | jq --sort-keys '.[].assigned_rate_limits') <(
+diff <(rpc_cmd bdev_get_bdevs -b "$uuid" | jq --sort-keys '.[].assigned_rate_limits') <(
 	jq --sort-keys <<- EOF
 		{
 		  "rw_ios_per_sec": 3000,
@@ -263,7 +280,7 @@ diff <(rpc_cmd bdev_get_bdevs -b null63 | jq --sort-keys '.[].assigned_rate_limi
 EOF
 
 # Make sure that limits were changed even if volume id is not set
-diff <(rpc_cmd bdev_get_bdevs -b null63 | jq --sort-keys '.[].assigned_rate_limits') <(
+diff <(rpc_cmd bdev_get_bdevs -b "$uuid" | jq --sort-keys '.[].assigned_rate_limits') <(
 	jq --sort-keys <<- EOF
 		{
 		  "rw_ios_per_sec": 4000,
@@ -299,7 +316,7 @@ NOT "$rootdir/scripts/sma-client.py" <<- EOF
 	  "method": "SetQos",
 	  "params": {
 	    "device_handle": "$device",
-	    "volume_id": "$(base64 <<<'invalid'))",
+	    "volume_id": "$(base64 <<< 'invalid'))",
 	    "maximum": {
 	      "rd_iops": 0,
 	      "wr_iops": 0,
@@ -313,7 +330,7 @@ NOT "$rootdir/scripts/sma-client.py" <<- EOF
 EOF
 
 # Values remain unchanged
-diff <(rpc_cmd bdev_get_bdevs -b null63 | jq --sort-keys '.[].assigned_rate_limits') <(
+diff <(rpc_cmd bdev_get_bdevs -b "$uuid" | jq --sort-keys '.[].assigned_rate_limits') <(
 	jq --sort-keys <<- EOF
 		{
 		  "rw_ios_per_sec": 4000,

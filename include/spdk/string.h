@@ -1,5 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2015 Intel Corporation.
+ *   Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES.
  *   All rights reserved.
  */
 
@@ -15,6 +16,9 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define _SPDK_STRINGIFY(x) #x
+#define SPDK_STRINGIFY(x) _SPDK_STRINGIFY(x)
 
 /**
  * sprintf with automatic buffer allocation.
@@ -191,7 +195,7 @@ int spdk_parse_ip_addr(char *ip, char **host, char **port);
  * \param cap_str Null terminated string.
  * \param cap Pointer where the parsed capacity (in bytes) will be put.
  * \param has_prefix Pointer to a flag that will be set to describe whether given
- * string contains a binary prefix.
+ * string contains a binary prefix (optional).
  *
  * \return 0 on success, or negative errno on failure.
  */
@@ -235,6 +239,51 @@ long int spdk_strtol(const char *nptr, int base);
  * \return positive number or zero on success, or negative errno on failure.
  */
 long long int spdk_strtoll(const char *nptr, int base);
+
+/**
+ * Build a NULL-terminated array of strings from the given string separated by
+ * the given chars in delim, as if split by strpbrk(). Empty items are pointers
+ * to an empty string.
+ *
+ * \param str Input string
+ * \param delim Separating delimiter set.
+ *
+ * \return the string array, or NULL on failure.
+ */
+char **spdk_strarray_from_string(const char *str, const char *delim);
+
+/**
+ * Duplicate a NULL-terminated array of strings. Returns NULL on failure.
+ * The array, and the strings, are allocated with the standard allocator (e.g.
+ * calloc()).
+ *
+ * \param strarray input array of strings.
+ */
+char **spdk_strarray_dup(const char **strarray);
+
+/**
+ * Free a NULL-terminated array of strings. The array and its strings must have
+ * been allocated with the standard allocator (calloc() etc.).
+ *
+ * \param strarray array of strings.
+ */
+void spdk_strarray_free(char **strarray);
+
+/**
+ * Copy a string into a fixed-size buffer with all occurrences of the search string
+ * replaced with the given replace substring. The fixed-size buffer must not be less
+ * than the string with the replaced values including the terminating null byte.
+ *
+ * \param dst Pointer to destination fixed-size buffer to fill.
+ * \param size Size of the destination fixed-size buffer in bytes.
+ * \param src Pointer to source null-terminated string to copy into dst.
+ * \param search The string being searched for.
+ * \param replace the replacement substring the replaces the found search substring.
+ *
+ * \return 0 on success, or negated errno on failure.
+ */
+int spdk_strcpy_replace(char *dst, size_t size, const char *src, const char *search,
+			const char *replace);
 
 #ifdef __cplusplus
 }

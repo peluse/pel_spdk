@@ -1,8 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2019 Intel Corporation.
  *   All rights reserved.
  */
-
 
 #ifndef VMD_SPEC_H
 #define VMD_SPEC_H
@@ -38,6 +37,10 @@
 #define  PCI_BRIDGE_PREFETCH_64     0x0001
 #define  PCI_BRIDGE_MEMORY_SHIFT    16
 #define  PCI_CONFIG_ACCESS_DELAY    500
+
+#define PCI_BAR0_OFFSET			0x10
+#define PCI_BAR_SIZE			4
+#define PCI_BAR_MEMORY_ADDR_OFFSET	(~0xfull)
 
 #define PCI_MAX_CFG_SIZE            0x1000
 

@@ -1,11 +1,12 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2020 Intel Corporation.
+ *   Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES.
  *   All rights reserved.
  */
 
 #include "spdk/stdinc.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "util/math.c"
 
@@ -29,24 +30,41 @@ test_serial_number_arithmetic(void)
 	CU_ASSERT(spdk_sn32_lt(100, UINT32_MAX - 100) == false);
 }
 
+static void
+test_memset_s(void)
+{
+	char secret[] = "0123456789abcdef";
+
+	/* Zero length, nothing should be changed */
+	spdk_memset_s(secret, sizeof(secret), 'b', 0);
+	CU_ASSERT_EQUAL(memcmp(secret, "0123456789abcdef", sizeof(secret)), 0);
+
+	/* Fill digits */
+	spdk_memset_s(secret, sizeof(secret), 'x', 10);
+	CU_ASSERT_EQUAL(memcmp(secret, "xxxxxxxxxxabcdef", sizeof(secret)), 0);
+
+	/* Fill the whole string except of the NULL char */
+	spdk_memset_s(secret, sizeof(secret), 'y', sizeof(secret) - 1);
+	CU_ASSERT_EQUAL(memcmp(secret, "yyyyyyyyyyyyyyyy", sizeof(secret) - 1), 0);
+}
+
 int
 main(int argc, char **argv)
 {
-	CU_pSuite	suite = NULL;
+	CU_pSuite	suite_math = NULL, suite_erase = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
-	suite = CU_add_suite("math", NULL, NULL);
+	suite_math = CU_add_suite("math", NULL, NULL);
+	CU_ADD_TEST(suite_math, test_serial_number_arithmetic);
 
-	CU_ADD_TEST(suite, test_serial_number_arithmetic);
+	suite_erase = CU_add_suite("erase", NULL, NULL);
+	CU_ADD_TEST(suite_erase, test_memset_s);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
 
-	CU_basic_run_tests();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 
-	num_failures = CU_get_number_of_failures();
 	CU_cleanup_registry();
 
 	return num_failures;

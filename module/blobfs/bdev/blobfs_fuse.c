@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2019 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -46,22 +46,10 @@ blobfs_fuse_free(struct spdk_blobfs_fuse *bfuse)
 	free(bfuse);
 }
 
-static void
-__call_fn(void *arg1, void *arg2)
-{
-	fs_request_fn fn;
-
-	fn = (fs_request_fn)arg1;
-	fn(arg2);
-}
-
 void
 blobfs_fuse_send_request(fs_request_fn fn, void *arg)
 {
-	struct spdk_event *event;
-
-	event = spdk_event_allocate(0, __call_fn, (void *)fn, arg);
-	spdk_event_call(event);
+	spdk_thread_send_msg(spdk_thread_get_app_thread(), fn, arg);
 }
 
 static int

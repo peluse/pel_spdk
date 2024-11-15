@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2017 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  */
 
@@ -9,6 +9,9 @@
 
 #ifndef SPDK_UTIL_H
 #define SPDK_UTIL_H
+
+/* memset_s is only available if __STDC_WANT_LIB_EXT1__ is set to 1 before including \<string.h\> */
+#define __STDC_WANT_LIB_EXT1__ 1
 
 #include "spdk/stdinc.h"
 
@@ -25,11 +28,20 @@ extern "C" {
 
 #define SPDK_CONTAINEROF(ptr, type, member) ((type *)((uintptr_t)ptr - offsetof(type, member)))
 
+/** Returns size of an object pointer by ptr up to and including member */
+#define SPDK_SIZEOF(ptr, member) (offsetof(__typeof__(*(ptr)), member) + sizeof((ptr)->member))
+
 /**
  * Get the size of a member of a struct.
  */
 #define SPDK_SIZEOF_MEMBER(type, member) (sizeof(((type *)0)->member))
 
+/**
+ * Get the number of elements in an array of a struct member
+ */
+#define SPDK_COUNTOF_MEMBER(type, member) (SPDK_COUNTOF(((type *)0)->member))
+
+#define SPDK_SEC_TO_MSEC 1000ULL
 #define SPDK_SEC_TO_USEC 1000000ULL
 #define SPDK_SEC_TO_NSEC 1000000000ULL
 
@@ -52,6 +64,29 @@ extern "C" {
  */
 #define SPDK_ALIGN_CEIL(val, align) \
 	SPDK_ALIGN_FLOOR(((val) + ((__typeof__(val)) (align) - 1)), align)
+
+#define SPDK_BIT(n) (1ul << (n))
+
+/**
+ * Check if a given field is valid in a structure with size tracking. The third
+ * parameter is optional and can be used to specify the size of the object.  If
+ * unset, (obj)->size will be used by default.
+ */
+#define SPDK_FIELD_VALID(obj, field, ...) \
+	_SPDK_FIELD_VALID(obj, field, ## __VA_ARGS__, (obj)->size)
+
+#define _SPDK_FIELD_VALID(obj, field, size, ...) \
+	((size) >= (offsetof(__typeof__(*(obj)), field) + sizeof((obj)->field)))
+/**
+ * Get a field from a structure with size tracking.  The fourth parameter is
+ * optional and can be used to specify the size of the object.  If unset,
+ * (obj)->size will be used by default.
+ */
+#define SPDK_GET_FIELD(obj, field, defval, ...) \
+	_SPDK_GET_FIELD(obj, field, defval, ## __VA_ARGS__, (obj)->size)
+
+#define _SPDK_GET_FIELD(obj, field, defval, size, ...) \
+	(SPDK_FIELD_VALID(obj, field, size) ? (obj)->field : (defval))
 
 uint32_t spdk_u32log2(uint32_t x);
 
@@ -101,30 +136,30 @@ spdk_divide_round_up(uint64_t num, uint64_t divisor)
 	return (num + divisor - 1) / divisor;
 }
 
-/**
- * Copy the data described by the source iovec to the destination iovec.
- *
- * \return The number of bytes copied.
- */
-size_t spdk_iovcpy(struct iovec *siov, size_t siovcnt, struct iovec *diov, size_t diovcnt);
+struct spdk_single_ioviter {
+	struct iovec	*iov;
+	size_t		iovcnt;
+	size_t		idx;
+	size_t		iov_len;
+	uint8_t		*iov_base;
+};
 
 /**
- * An iovec iterator. Can be allocated on the stack.
+ * An N-way iovec iterator. Calculate the size, given N, using
+ * SPDK_IOVITER_SIZE. For backward compatibility, the structure
+ * has a default size of 2 iovecs.
  */
 struct spdk_ioviter {
-	struct iovec	*siov;
-	size_t		siovcnt;
+	uint32_t	count;
 
-	struct iovec	*diov;
-	size_t		diovcnt;
-
-	size_t		sidx;
-	size_t		didx;
-	int		siov_len;
-	uint8_t		*siov_base;
-	int		diov_len;
-	uint8_t		*diov_base;
+	union {
+		struct spdk_single_ioviter iters_compat[2];
+		struct spdk_single_ioviter iters[0];
+	};
 };
+
+/* count must be greater than or equal to 2 */
+#define SPDK_IOVITER_SIZE(count) (sizeof(struct spdk_single_ioviter) * (count - 2) + sizeof(struct spdk_ioviter))
 
 /**
  * Initialize and move to the first common segment of the two given
@@ -134,6 +169,16 @@ size_t spdk_ioviter_first(struct spdk_ioviter *iter,
 			  struct iovec *siov, size_t siovcnt,
 			  struct iovec *diov, size_t diovcnt,
 			  void **src, void **dst);
+
+/**
+ * Initialize and move to the first common segment of the N given
+ * iovecs. See spdk_ioviter_nextv().
+ */
+size_t spdk_ioviter_firstv(struct spdk_ioviter *iter,
+			   uint32_t count,
+			   struct iovec **iov,
+			   size_t *iovcnt,
+			   void **out);
 
 /**
  * Move to the next segment in the iterator.
@@ -146,6 +191,78 @@ size_t spdk_ioviter_first(struct spdk_ioviter *iter,
  * the iteration is complete on the fifth call.
  */
 size_t spdk_ioviter_next(struct spdk_ioviter *iter, void **src, void **dst);
+
+/**
+ * Move to the next segment in the iterator.
+ *
+ * This will iterate through the segments of the iovecs in the iterator
+ * and return the individual segments, one by one. For example, if the
+ * set consists one iovec of one element of length 4k and another iovec
+ * of 4 elements each of length 1k, this function will return
+ * 4 1k pairs of buffers, and then return 0 bytes to indicate
+ * the iteration is complete on the fifth call.
+ */
+size_t spdk_ioviter_nextv(struct spdk_ioviter *iter, void **out);
+
+/**
+ * Operate like memset across an iovec.
+ */
+void
+spdk_iov_memset(struct iovec *iovs, int iovcnt, int c);
+
+/**
+ * Initialize an iovec with just the single given buffer.
+ */
+#define SPDK_IOV_ONE(piov, piovcnt, buf, buflen) do {	\
+	(piov)->iov_base = (buf);			\
+	(piov)->iov_len = (buflen);			\
+	*(piovcnt) = 1;					\
+} while (0)
+
+/**
+ * Copy the data described by the source iovec to the destination iovec.
+ *
+ * \return The number of bytes copied.
+ */
+size_t spdk_iovcpy(struct iovec *siov, size_t siovcnt, struct iovec *diov, size_t diovcnt);
+
+/**
+ * Same as spdk_iovcpy(), but the src/dst buffers might overlap.
+ *
+ * \return The number of bytes copied.
+ */
+size_t spdk_iovmove(struct iovec *siov, size_t siovcnt, struct iovec *diov, size_t diovcnt);
+
+/**
+ * Transfer state for iterative copying in or out of an iovec.
+ */
+struct spdk_iov_xfer {
+	struct iovec *iovs;
+	int iovcnt;
+	int cur_iov_idx;
+	size_t cur_iov_offset;
+};
+
+/**
+ * Initialize a transfer context to point to the given iovec.
+ */
+void
+spdk_iov_xfer_init(struct spdk_iov_xfer *ix, struct iovec *iovs, int iovcnt);
+
+/**
+ * Copy from the given buf up to buf_len bytes, into the given ix iovec
+ * iterator, advancing the iterator as needed.. Returns the number of bytes
+ * copied.
+ */
+size_t
+spdk_iov_xfer_from_buf(struct spdk_iov_xfer *ix, const void *buf, size_t buf_len);
+
+/**
+ * Copy from the given ix iovec iterator into the given buf up to buf_len
+ * bytes, advancing the iterator as needed. Returns the number of bytes copied.
+ */
+size_t
+spdk_iov_xfer_to_buf(struct spdk_iov_xfer *ix, const void *buf, size_t buf_len);
 
 /**
  * Copy iovs contents to buf through memcpy.
@@ -221,6 +338,38 @@ spdk_sn32_gt(uint32_t s1, uint32_t s2)
 	return (s1 != s2) &&
 	       ((s1 < s2 && s2 - s1 > SPDK_SN32_CMPMAX) ||
 		(s1 > s2 && s1 - s2 < SPDK_SN32_CMPMAX));
+}
+
+/**
+ * Copies the value (unsigned char)ch into each of the first \b count characters of the object pointed to by \b data
+ * \b data_size is used to check that filling \b count bytes won't lead to buffer overflow
+ *
+ * \param data Buffer to fill
+ * \param data_size Size of the buffer
+ * \param ch Fill byte
+ * \param count Number of bytes to fill
+ */
+static inline void
+spdk_memset_s(void *data, size_t data_size, int ch, size_t count)
+{
+#ifdef __STDC_LIB_EXT1__
+	/* memset_s was introduced as an optional feature in C11 */
+	memset_s(data, data_size, ch, count);
+#else
+	size_t i;
+	volatile unsigned char *buf = (volatile unsigned char *)data;
+
+	if (!buf) {
+		return;
+	}
+	if (count > data_size) {
+		count = data_size;
+	}
+
+	for (i = 0; i < count; i++) {
+		buf[i] = (unsigned char)ch;
+	}
+#endif
 }
 
 #ifdef __cplusplus

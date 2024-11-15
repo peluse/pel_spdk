@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2022 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -10,5 +10,6 @@
 #include "utils/ftl_mempool.h"
 #include "utils/ftl_conf.h"
 #include "utils/ftl_md.h"
+#include "utils/ftl_property.h"
 
 #endif /* FTL_FTL_UTILS_H */

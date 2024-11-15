@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2016 Intel Corporation
+#  All rights reserved.
+#
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
@@ -40,7 +43,7 @@ $rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 raid0
 # Append the concat0 bdev into subsystem
 $rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 concat0
 
-nvme connect -t $TEST_TRANSPORT -n "nqn.2016-06.io.spdk:cnode1" -a "$NVMF_FIRST_TARGET_IP" -s "$NVMF_PORT"
+$NVME_CONNECT "${NVME_HOST[@]}" -t $TEST_TRANSPORT -n "nqn.2016-06.io.spdk:cnode1" -a "$NVMF_FIRST_TARGET_IP" -s "$NVMF_PORT"
 
 waitforserial $NVMF_SERIAL 4
 
@@ -66,7 +69,7 @@ done
 fio_status=0
 wait $fio_pid || fio_status=$?
 
-nvme disconnect -n "nqn.2016-06.io.spdk:cnode1" || true
+nvme disconnect -n "nqn.2016-06.io.spdk:cnode1"
 waitforserial_disconnect "$NVMF_SERIAL"
 
 if [ $fio_status -eq 0 ]; then

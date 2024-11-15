@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2017 Intel Corporation
+#  All rights reserved.
+#
 SYSTEM=$(uname -s)
 size="1024M"
 nvme_disk="/var/lib/libvirt/images/nvme_disk.img"
@@ -47,23 +51,19 @@ if [ "${SYSTEM}" != "Linux" ]; then
 	exit 2
 fi
 
-WHICH_OS=$(lsb_release -i | awk '{print $3}')
+source /etc/os-release
 qemu-img create -f raw "$nvme_disk" -o preallocation="$preallocation" $size
 
-case $WHICH_OS in
-	"Fedora")
+# That's just a wild guess for now
+# TODO: needs improvement for other distros
+qemu_user_group="libvirt-qemu:kvm"
+
+case "$ID" in
+	"fedora")
 		qemu_user_group="qemu:qemu"
 
 		# Change SE Policy
 		sudo chcon -t svirt_image_t "$nvme_disk"
-		;;
-	"Ubuntu")
-		qemu_user_group="libvirt-qemu:kvm"
-		;;
-	*)
-		# That's just a wild guess for now
-		# TODO: needs improvement for other distros
-		qemu_user_group="libvirt-qemu:kvm"
 		;;
 esac
 

@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright(c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2017 Intel Corporation. All rights reserved.
  *   All rights reserved.
  */
 
@@ -13,38 +13,46 @@
 #include "spdk/barrier.h"
 #include "spdk/vhost.h"
 #include "vhost_internal.h"
+#include "spdk/queue.h"
 
 static struct spdk_cpuset g_vhost_core_mask;
 
-static TAILQ_HEAD(, spdk_vhost_dev) g_vhost_devices = TAILQ_HEAD_INITIALIZER(
-			g_vhost_devices);
 static pthread_mutex_t g_vhost_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static TAILQ_HEAD(, spdk_virtio_blk_transport) g_virtio_blk_transports = TAILQ_HEAD_INITIALIZER(
 			g_virtio_blk_transports);
 
+static spdk_vhost_fini_cb g_fini_cb;
+
+static RB_HEAD(vhost_dev_name_tree,
+	       spdk_vhost_dev) g_vhost_devices = RB_INITIALIZER(g_vhost_devices);
+
+static int
+vhost_dev_name_cmp(struct spdk_vhost_dev *vdev1, struct spdk_vhost_dev *vdev2)
+{
+	return strcmp(vdev1->name, vdev2->name);
+}
+
+RB_GENERATE_STATIC(vhost_dev_name_tree, spdk_vhost_dev, node, vhost_dev_name_cmp);
+
 struct spdk_vhost_dev *
 spdk_vhost_dev_next(struct spdk_vhost_dev *vdev)
 {
 	if (vdev == NULL) {
-		return TAILQ_FIRST(&g_vhost_devices);
+		return RB_MIN(vhost_dev_name_tree, &g_vhost_devices);
 	}
 
-	return TAILQ_NEXT(vdev, tailq);
+	return RB_NEXT(vhost_dev_name_tree, &g_vhost_devices, vdev);
 }
 
 struct spdk_vhost_dev *
 spdk_vhost_dev_find(const char *ctrlr_name)
 {
-	struct spdk_vhost_dev *vdev;
+	struct spdk_vhost_dev find = {};
 
-	TAILQ_FOREACH(vdev, &g_vhost_devices, tailq) {
-		if (strcmp(vdev->name, ctrlr_name) == 0) {
-			return vdev;
-		}
-	}
+	find.name = (char *)ctrlr_name;
 
-	return NULL;
+	return RB_FIND(vhost_dev_name_tree, &g_vhost_devices, &find);
 }
 
 static int
@@ -106,9 +114,8 @@ virtio_blk_get_transport_ops(const char *transport_name)
 
 int
 vhost_dev_register(struct spdk_vhost_dev *vdev, const char *name, const char *mask_str,
-		   const struct spdk_json_val *params,
-		   const struct spdk_vhost_dev_backend *backend,
-		   const struct spdk_vhost_user_dev_backend *user_backend)
+		   const struct spdk_json_val *params, const struct spdk_vhost_dev_backend *backend,
+		   const struct spdk_vhost_user_dev_backend *user_backend, bool delay)
 {
 	struct spdk_cpuset cpumask = {};
 	int rc;
@@ -124,29 +131,40 @@ vhost_dev_register(struct spdk_vhost_dev *vdev, const char *name, const char *ma
 			    mask_str, spdk_cpuset_fmt(&g_vhost_core_mask));
 		return -EINVAL;
 	}
+	vdev->use_default_cpumask = false;
+	if (!mask_str) {
+		vdev->use_default_cpumask = true;
+	}
 
+	spdk_vhost_lock();
 	if (spdk_vhost_dev_find(name)) {
 		SPDK_ERRLOG("vhost controller %s already exists.\n", name);
+		spdk_vhost_unlock();
 		return -EEXIST;
 	}
 
 	vdev->name = strdup(name);
 	if (vdev->name == NULL) {
+		spdk_vhost_unlock();
 		return -EIO;
 	}
 
 	vdev->backend = backend;
 	if (vdev->backend->type == VHOST_BACKEND_SCSI) {
-		rc = vhost_user_dev_register(vdev, name, &cpumask, user_backend);
+		rc = vhost_user_dev_create(vdev, name, &cpumask, user_backend, delay);
 	} else {
+		/* When VHOST_BACKEND_BLK, delay should not be true. */
+		assert(delay == false);
 		rc = virtio_blk_construct_ctrlr(vdev, name, &cpumask, params, user_backend);
 	}
 	if (rc != 0) {
 		free(vdev->name);
+		spdk_vhost_unlock();
 		return rc;
 	}
 
-	TAILQ_INSERT_TAIL(&g_vhost_devices, vdev, tailq);
+	RB_INSERT(vhost_dev_name_tree, &g_vhost_devices, vdev);
+	spdk_vhost_unlock();
 
 	SPDK_INFOLOG(vhost, "Controller %s: new controller added\n", vdev->name);
 	return 0;
@@ -157,19 +175,27 @@ vhost_dev_unregister(struct spdk_vhost_dev *vdev)
 {
 	int rc;
 
+	spdk_vhost_lock();
 	if (vdev->backend->type == VHOST_BACKEND_SCSI) {
 		rc = vhost_user_dev_unregister(vdev);
 	} else {
 		rc = virtio_blk_destroy_ctrlr(vdev);
 	}
 	if (rc != 0) {
+		spdk_vhost_unlock();
 		return rc;
 	}
 
 	SPDK_INFOLOG(vhost, "Controller %s: removed\n", vdev->name);
 
 	free(vdev->name);
-	TAILQ_REMOVE(&g_vhost_devices, vdev, tailq);
+
+	RB_REMOVE(vhost_dev_name_tree, &g_vhost_devices, vdev);
+	if (RB_EMPTY(&g_vhost_devices) && g_fini_cb != NULL) {
+		g_fini_cb();
+	}
+	spdk_vhost_unlock();
+
 	return 0;
 }
 
@@ -198,6 +224,22 @@ int
 spdk_vhost_dev_remove(struct spdk_vhost_dev *vdev)
 {
 	return vdev->backend->remove_device(vdev);
+}
+
+int
+spdk_vhost_set_coalescing(struct spdk_vhost_dev *vdev, uint32_t delay_base_us,
+			  uint32_t iops_threshold)
+{
+	assert(vdev->backend->set_coalescing != NULL);
+	return vdev->backend->set_coalescing(vdev, delay_base_us, iops_threshold);
+}
+
+void
+spdk_vhost_get_coalescing(struct spdk_vhost_dev *vdev, uint32_t *delay_base_us,
+			  uint32_t *iops_threshold)
+{
+	assert(vdev->backend->get_coalescing != NULL);
+	vdev->backend->get_coalescing(vdev, delay_base_us, iops_threshold);
 }
 
 void
@@ -237,14 +279,16 @@ spdk_vhost_scsi_init(spdk_vhost_init_cb init_cb)
 	init_cb(ret);
 }
 
-static spdk_vhost_fini_cb g_fini_cb;
-
 static void
 vhost_fini(void)
 {
 	struct spdk_vhost_dev *vdev, *tmp;
 
-	spdk_vhost_lock();
+	if (spdk_vhost_dev_next(NULL) == NULL) {
+		g_fini_cb();
+		return;
+	}
+
 	vdev = spdk_vhost_dev_next(NULL);
 	while (vdev != NULL) {
 		tmp = spdk_vhost_dev_next(vdev);
@@ -252,9 +296,8 @@ vhost_fini(void)
 		/* don't care if it fails, there's nothing we can do for now */
 		vdev = tmp;
 	}
-	spdk_vhost_unlock();
 
-	g_fini_cb();
+	/* g_fini_cb will get called when last device is unregistered. */
 }
 
 void
@@ -347,6 +390,26 @@ spdk_vhost_scsi_config_json(struct spdk_json_write_ctx *w)
 	spdk_json_write_array_end(w);
 }
 
+static void
+vhost_blk_dump_config_json(struct spdk_json_write_ctx *w)
+{
+	struct spdk_virtio_blk_transport *transport;
+
+	/* Write vhost transports */
+	TAILQ_FOREACH(transport, &g_virtio_blk_transports, tailq) {
+		/* Since vhost_user_blk is always added on SPDK startup,
+		 * do not emit virtio_blk_create_transport RPC. */
+		if (strcasecmp(transport->ops->name, "vhost_user_blk") != 0) {
+			spdk_json_write_object_begin(w);
+			spdk_json_write_named_string(w, "method", "virtio_blk_create_transport");
+			spdk_json_write_named_object_begin(w, "params");
+			transport->ops->dump_opts(transport, w);
+			spdk_json_write_object_end(w);
+			spdk_json_write_object_end(w);
+		}
+	}
+}
+
 void
 spdk_vhost_blk_config_json(struct spdk_json_write_ctx *w)
 {
@@ -362,6 +425,8 @@ spdk_vhost_blk_config_json(struct spdk_json_write_ctx *w)
 		}
 	}
 	spdk_vhost_unlock();
+
+	vhost_blk_dump_config_json(w);
 
 	spdk_json_write_array_end(w);
 }
@@ -417,6 +482,46 @@ virtio_blk_transport_create(const char *transport_name,
 	transport->ops = ops;
 	TAILQ_INSERT_TAIL(&g_virtio_blk_transports, transport, tailq);
 	return 0;
+}
+
+struct spdk_virtio_blk_transport *
+virtio_blk_transport_get_first(void)
+{
+	return TAILQ_FIRST(&g_virtio_blk_transports);
+}
+
+struct spdk_virtio_blk_transport *
+virtio_blk_transport_get_next(struct spdk_virtio_blk_transport *transport)
+{
+	return TAILQ_NEXT(transport, tailq);
+}
+
+void
+virtio_blk_transport_dump_opts(struct spdk_virtio_blk_transport *transport,
+			       struct spdk_json_write_ctx *w)
+{
+	spdk_json_write_object_begin(w);
+
+	spdk_json_write_named_string(w, "name", transport->ops->name);
+
+	if (transport->ops->dump_opts) {
+		transport->ops->dump_opts(transport, w);
+	}
+
+	spdk_json_write_object_end(w);
+}
+
+struct spdk_virtio_blk_transport *
+virtio_blk_tgt_get_transport(const char *transport_name)
+{
+	struct spdk_virtio_blk_transport *transport;
+
+	TAILQ_FOREACH(transport, &g_virtio_blk_transports, tailq) {
+		if (strcasecmp(transport->ops->name, transport_name) == 0) {
+			return transport;
+		}
+	}
+	return NULL;
 }
 
 int

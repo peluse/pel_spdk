@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2022 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -121,16 +121,16 @@ struct ftl_l2p_cache {
 	struct ftl_mempool *page_sets_pool;
 	TAILQ_HEAD(, ftl_l2p_page_set) deferred_page_set_list; /* for deferred page sets */
 
-	/* Process unmap in backgorund */
+	/* Process trim in background */
 	struct {
-#define FTL_L2P_MAX_LAZY_UNMAP_QD 1
-		/* Unmap queue depth */
+#define FTL_L2P_MAX_LAZY_TRIM_QD 1
+		/* Trim queue depth */
 		uint32_t qd;
 		/* Currently processed page */
 		uint64_t page_no;
 		/* Context for page pinning */
 		struct ftl_l2p_pin_ctx pin_ctx;
-	} lazy_unmap;
+	} lazy_trim;
 
 	/* This is a context for a management process */
 	struct ftl_l2p_cache_process_ctx mctx;
@@ -440,7 +440,7 @@ ftl_l2p_cache_init(struct spdk_ftl_dev *dev)
 	cache = (struct ftl_l2p_cache *)dev->l2p;
 	cache->page_sets_pool = ftl_mempool_create(page_sets_pool_size,
 				sizeof(struct ftl_l2p_page_set),
-				64, SPDK_ENV_SOCKET_ID_ANY);
+				64, SPDK_ENV_NUMA_ID_ANY);
 	if (!cache->page_sets_pool) {
 		return -1;
 	}
@@ -504,7 +504,6 @@ ftl_l2p_cache_init(struct spdk_ftl_dev *dev)
 	cache->cache_layout_bdev_desc = reg->bdev_desc;
 	cache->cache_layout_ioch = reg->ioch;
 
-	cache->state = L2P_CACHE_RUNNING;
 	return 0;
 }
 
@@ -612,12 +611,12 @@ process_persist_page_out_cb(struct spdk_bdev_io *bdev_io, bool success, void *ar
 		ctx->status = -EIO;
 	}
 
-	if (ftl_bitmap_get(dev->unmap_map, ctx->idx)) {
+	if (ftl_bitmap_get(dev->trim_map, ctx->idx)) {
 		/*
-		 * Page had been unmapped, in persist path before IO, it was invalidated entirely
-		 * now clear unmap flag
+		 * Page had been trimmed, in persist path before IO, it was invalidated entirely
+		 * now clear trim flag
 		 */
-		ftl_bitmap_clear(dev->unmap_map, page->page_no);
+		ftl_bitmap_clear(dev->trim_map, page->page_no);
 	}
 	ftl_l2p_cache_page_remove(cache, page);
 
@@ -668,10 +667,10 @@ process_page_out_retry(void *_page)
 	process_page_out(page, page->ctx.cb);
 }
 
-static void process_unmap(struct ftl_l2p_cache *cache);
+static void process_trim(struct ftl_l2p_cache *cache);
 
 static void
-process_unmap_page_out_cb(struct spdk_bdev_io *bdev_io, bool success, void *ctx_page)
+process_trim_page_out_cb(struct spdk_bdev_io *bdev_io, bool success, void *ctx_page)
 {
 	struct ftl_l2p_page *page = (struct ftl_l2p_page *)ctx_page;
 	struct ftl_l2p_cache *cache = (struct ftl_l2p_cache *)page->ctx.cache;
@@ -687,16 +686,16 @@ process_unmap_page_out_cb(struct spdk_bdev_io *bdev_io, bool success, void *ctx_
 	}
 
 	assert(!page->on_lru_list);
-	assert(ftl_bitmap_get(dev->unmap_map, page->page_no));
-	ftl_bitmap_clear(dev->unmap_map, page->page_no);
+	assert(ftl_bitmap_get(dev->trim_map, page->page_no));
+	ftl_bitmap_clear(dev->trim_map, page->page_no);
 	ftl_l2p_cache_page_remove(cache, page);
 
 	ctx->qd--;
-	process_unmap(cache);
+	process_trim(cache);
 }
 
 static void
-process_unmap_page_in_cb(struct spdk_bdev_io *bdev_io, bool success, void *ctx_page)
+process_trim_page_in_cb(struct spdk_bdev_io *bdev_io, bool success, void *ctx_page)
 {
 	struct ftl_l2p_page *page = (struct ftl_l2p_page *)ctx_page;
 	struct ftl_l2p_cache *cache = (struct ftl_l2p_cache *)page->ctx.cache;
@@ -708,26 +707,26 @@ process_unmap_page_in_cb(struct spdk_bdev_io *bdev_io, bool success, void *ctx_p
 		spdk_bdev_free_io(bdev_io);
 	}
 	if (success) {
-		assert(ftl_bitmap_get(dev->unmap_map, page->page_no));
+		assert(ftl_bitmap_get(dev->trim_map, page->page_no));
 		ftl_l2p_page_set_invalid(dev, page);
-		process_page_out(page, process_unmap_page_out_cb);
+		process_page_out(page, process_trim_page_out_cb);
 	} else {
 		ctx->status = -EIO;
 		ctx->qd--;
-		process_unmap(cache);
+		process_trim(cache);
 	}
 }
 
 static void
-process_unmap(struct ftl_l2p_cache *cache)
+process_trim(struct ftl_l2p_cache *cache)
 {
 	struct ftl_l2p_cache_process_ctx *ctx = &cache->mctx;
 
 	while (ctx->idx < cache->num_pages && ctx->qd < 64) {
 		struct ftl_l2p_page *page;
 
-		if (!ftl_bitmap_get(cache->dev->unmap_map, ctx->idx)) {
-			/* Page had not been unmapped, continue */
+		if (!ftl_bitmap_get(cache->dev->trim_map, ctx->idx)) {
+			/* Page had not been trimmed, continue */
 			ctx->idx++;
 			continue;
 		}
@@ -747,7 +746,7 @@ process_unmap(struct ftl_l2p_cache *cache)
 		page->ctx.cache = cache;
 
 		ftl_l2p_cache_page_insert(cache, page);
-		process_page_in(page, process_unmap_page_in_cb);
+		process_page_in(page, process_trim_page_in_cb);
 
 		ctx->qd++;
 		ctx->idx++;
@@ -759,12 +758,12 @@ process_unmap(struct ftl_l2p_cache *cache)
 }
 
 void
-ftl_l2p_cache_unmap(struct spdk_ftl_dev *dev, ftl_l2p_cb cb, void *cb_ctx)
+ftl_l2p_cache_trim(struct spdk_ftl_dev *dev, ftl_l2p_cb cb, void *cb_ctx)
 {
 	struct ftl_l2p_cache *cache = (struct ftl_l2p_cache *)dev->l2p;
 
 	process_init_ctx(dev, cache, cb, cb_ctx);
-	process_unmap(cache);
+	process_trim(cache);
 }
 
 static void
@@ -904,8 +903,8 @@ process_persist(struct ftl_l2p_cache *cache)
 			continue;
 		}
 
-		/* Finished unmap if the page was marked */
-		if (ftl_bitmap_get(dev->unmap_map, ctx->idx)) {
+		/* Finish trim if the page was marked */
+		if (ftl_bitmap_get(dev->trim_map, ctx->idx)) {
 			ftl_l2p_page_set_invalid(dev, page);
 		}
 
@@ -957,6 +956,15 @@ ftl_l2p_cache_halt(struct spdk_ftl_dev *dev)
 			cache->state = L2P_CACHE_SHUTDOWN_DONE;
 		}
 	}
+}
+
+void
+ftl_l2p_cache_resume(struct spdk_ftl_dev *dev)
+{
+	struct ftl_l2p_cache *cache = (struct ftl_l2p_cache *)dev->l2p;
+
+	assert(cache->state == L2P_CACHE_INIT);
+	cache->state = L2P_CACHE_RUNNING;
 }
 
 static inline struct ftl_l2p_page *
@@ -1089,9 +1097,9 @@ ftl_l2p_cache_get(struct spdk_ftl_dev *dev, uint64_t lba)
 	assert(ftl_l2p_cache_running(cache));
 	assert(page->pin_ref_cnt);
 
-	if (ftl_bitmap_get(dev->unmap_map, page->page_no)) {
+	if (ftl_bitmap_get(dev->trim_map, page->page_no)) {
 		ftl_l2p_page_set_invalid(dev, page);
-		ftl_bitmap_clear(dev->unmap_map, page->page_no);
+		ftl_bitmap_clear(dev->trim_map, page->page_no);
 	}
 
 	ftl_l2p_cache_lru_promote_page(cache, page);
@@ -1111,9 +1119,9 @@ ftl_l2p_cache_set(struct spdk_ftl_dev *dev, uint64_t lba, ftl_addr addr)
 	assert(ftl_l2p_cache_running(cache));
 	assert(page->pin_ref_cnt);
 
-	if (ftl_bitmap_get(dev->unmap_map, page->page_no)) {
+	if (ftl_bitmap_get(dev->trim_map, page->page_no)) {
 		ftl_l2p_page_set_invalid(dev, page);
-		ftl_bitmap_clear(dev->unmap_map, page->page_no);
+		ftl_bitmap_clear(dev->trim_map, page->page_no);
 	}
 
 	page->updates++;
@@ -1332,6 +1340,8 @@ ftl_l2p_cache_process_page_sets(struct spdk_ftl_dev *dev, struct ftl_l2p_cache *
 		return -EBUSY;
 	}
 
+	ftl_add_io_activity(dev);
+
 	TAILQ_REMOVE(&cache->deferred_page_set_list, page_set, list_entry);
 	page_set->deferred = 0;
 	page_set->locked = 1;
@@ -1477,6 +1487,8 @@ ftl_l2p_cache_process_eviction(struct spdk_ftl_dev *dev, struct ftl_l2p_cache *c
 		return;
 	}
 
+	ftl_add_io_activity(dev);
+
 	page = eviction_get_page(dev, cache);
 	if (spdk_unlikely(!page)) {
 		return;
@@ -1493,13 +1505,13 @@ ftl_l2p_cache_process_eviction(struct spdk_ftl_dev *dev, struct ftl_l2p_cache *c
 }
 
 static void
-ftl_l2p_lazy_unmap_process_cb(struct spdk_ftl_dev *dev, int status, struct ftl_l2p_pin_ctx *pin_ctx)
+ftl_l2p_lazy_trim_process_cb(struct spdk_ftl_dev *dev, int status, struct ftl_l2p_pin_ctx *pin_ctx)
 {
 	struct ftl_l2p_cache *cache = dev->l2p;
 
-	cache->lazy_unmap.qd--;
+	cache->lazy_trim.qd--;
 
-	/* We will retry on next ftl_l2p_lazy_unmap_process */
+	/* We will retry on next ftl_l2p_lazy_trim_process */
 	if (spdk_unlikely(status != 0)) {
 		return;
 	}
@@ -1512,43 +1524,43 @@ ftl_l2p_lazy_unmap_process_cb(struct spdk_ftl_dev *dev, int status, struct ftl_l
 }
 
 static void
-ftl_l2p_lazy_unmap_process(struct spdk_ftl_dev *dev)
+ftl_l2p_lazy_trim_process(struct spdk_ftl_dev *dev)
 {
 	struct ftl_l2p_cache *cache = dev->l2p;
 	struct ftl_l2p_pin_ctx *pin_ctx;
 	uint64_t page_no;
 
-	if (spdk_likely(!dev->unmap_in_progress)) {
+	if (spdk_likely(!dev->trim_in_progress)) {
 		return;
 	}
 
-	if (cache->lazy_unmap.qd == FTL_L2P_MAX_LAZY_UNMAP_QD) {
+	if (cache->lazy_trim.qd == FTL_L2P_MAX_LAZY_TRIM_QD) {
 		return;
 	}
 
-	page_no = ftl_bitmap_find_first_set(dev->unmap_map, cache->lazy_unmap.page_no, UINT64_MAX);
+	page_no = ftl_bitmap_find_first_set(dev->trim_map, cache->lazy_trim.page_no, UINT64_MAX);
 	if (page_no == UINT64_MAX) {
-		cache->lazy_unmap.page_no = 0;
+		cache->lazy_trim.page_no = 0;
 
-		/* Check unmap map from beginning to detect unprocessed unmaps */
-		page_no = ftl_bitmap_find_first_set(dev->unmap_map, cache->lazy_unmap.page_no, UINT64_MAX);
+		/* Check trim map from beginning to detect unprocessed trims */
+		page_no = ftl_bitmap_find_first_set(dev->trim_map, cache->lazy_trim.page_no, UINT64_MAX);
 		if (page_no == UINT64_MAX) {
-			dev->unmap_in_progress = false;
+			dev->trim_in_progress = false;
 			return;
 		}
 	}
 
-	cache->lazy_unmap.page_no = page_no;
+	cache->lazy_trim.page_no = page_no;
 
-	pin_ctx = &cache->lazy_unmap.pin_ctx;
+	pin_ctx = &cache->lazy_trim.pin_ctx;
 
-	cache->lazy_unmap.qd++;
-	assert(cache->lazy_unmap.qd <= FTL_L2P_MAX_LAZY_UNMAP_QD);
+	cache->lazy_trim.qd++;
+	assert(cache->lazy_trim.qd <= FTL_L2P_MAX_LAZY_TRIM_QD);
 	assert(page_no < cache->num_pages);
 
 	pin_ctx->lba = page_no * cache->lbas_in_page;
 	pin_ctx->count = 1;
-	pin_ctx->cb = ftl_l2p_lazy_unmap_process_cb;
+	pin_ctx->cb = ftl_l2p_lazy_trim_process_cb;
 	pin_ctx->cb_ctx = pin_ctx;
 
 	ftl_l2p_cache_pin(dev, pin_ctx);
@@ -1571,5 +1583,5 @@ ftl_l2p_cache_process(struct spdk_ftl_dev *dev)
 	}
 
 	ftl_l2p_cache_process_eviction(dev, cache);
-	ftl_l2p_lazy_unmap_process(dev);
+	ftl_l2p_lazy_trim_process(dev);
 }

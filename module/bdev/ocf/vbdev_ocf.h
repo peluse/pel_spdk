@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2018 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -57,7 +57,7 @@ struct vbdev_ocf_config {
 	struct ocf_mngt_cache_config        cache;
 
 	/* Cache device config */
-	struct ocf_mngt_cache_device_config device;
+	struct ocf_mngt_cache_attach_config attach;
 
 	/* Core initial config */
 	struct ocf_mngt_core_config         core;
@@ -141,8 +141,15 @@ struct vbdev_ocf {
 
 	/* Management context */
 	struct vbdev_ocf_mngt_ctx    mngt_ctx;
-	/* Cache conext */
+
+	/* Cache context */
 	struct vbdev_ocf_cache_ctx  *cache_ctx;
+
+	/* Status of flushing operation */
+	struct {
+		bool in_progress;
+		int status;
+	} flush;
 
 	/* Exposed SPDK bdev. Registered in bdev layer */
 	struct spdk_bdev             exp_bdev;

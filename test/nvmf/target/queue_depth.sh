@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation
+#  All rights reserved.
+#
 
 # Test for if we can allocate a request for the FABRICS_CONNECT when all requests objects are consumed by the queued I/O
 
@@ -22,13 +26,13 @@ $rpc_py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK0000000000000
 $rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Malloc0
 $rpc_py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t $TEST_TRANSPORT -a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT
 
-$rootdir/test/bdev/bdevperf/bdevperf -z -r $bdevperf_rpc_sock -q 1024 -o 4096 -w verify -t 10 &
+$rootdir/build/examples/bdevperf -z -r $bdevperf_rpc_sock -q 1024 -o 4096 -w verify -t 10 "${NO_HUGE[@]}" &
 bdevperf_pid=$!
 
 trap 'process_shm --id $NVMF_APP_SHM_ID; killprocess $bdevperf_pid; nvmftestfini; exit 1' SIGINT SIGTERM EXIT
 waitforlisten $bdevperf_pid $bdevperf_rpc_sock
 $rpc_py -s $bdevperf_rpc_sock bdev_nvme_attach_controller -b NVMe0 -t $TEST_TRANSPORT -a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT -f ipv4 -n nqn.2016-06.io.spdk:cnode1
-$rootdir/test/bdev/bdevperf/bdevperf.py -s $bdevperf_rpc_sock perform_tests
+$rootdir/examples/bdev/bdevperf/bdevperf.py -s $bdevperf_rpc_sock perform_tests
 
 # if this test fails it means we didn't fail over to the second
 

@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -12,7 +12,6 @@
 #include "spdk/string.h"
 #include "spdk/nvme_intel.h"
 #include "spdk/histogram_data.h"
-#include "spdk/string.h"
 #include "spdk/log.h"
 
 #if HAVE_LIBAIO
@@ -697,6 +696,7 @@ main(int argc, char **argv)
 	int			rc;
 	struct spdk_env_opts	opts;
 
+	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
 	rc = parse_args(argc, argv, &opts);
 	if (rc != 0) {

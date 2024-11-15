@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2018 Intel Corporation
+#  All rights reserved.
+#
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../..)
 source $rootdir/test/common/autotest_common.sh
@@ -59,6 +62,7 @@ $rpc_py -t $timeout $ftl_construct_args
 	$rpc_py save_subsystem_config -n bdev
 	echo ']}'
 ) > $testdir/config/ftl.json
+$rpc_py bdev_ftl_unload -b ftl0
 killprocess $svcpid
 
 # Generate random data and calculate checksum
@@ -71,7 +75,7 @@ md5sum $testdir/testfile > $testdir/testfile.md5
 
 md5sum -c $testdir/testfile.md5
 
-# Write second time at overlapped sectors, read back and verify checkum
+# Write second time at overlapped sectors, read back and verify checksum
 "$SPDK_BIN_DIR/spdk_dd" --if=$testdir/testfile --ob=ftl0 --json=$testdir/config/ftl.json --seek=131072
 "$SPDK_BIN_DIR/spdk_dd" --ib=ftl0 --of=$testdir/testfile --json=$testdir/config/ftl.json --skip=131072 --count=262144
 

@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2018 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  */
 
@@ -828,6 +828,7 @@ main(int argc, char **argv)
 
 	spdk_app_opts_init(&opts, sizeof(opts));
 	opts.name = "nvme_fuzz";
+	opts.rpc_addr = NULL;
 
 	g_runtime = DEFAULT_RUNTIME;
 	g_run = true;

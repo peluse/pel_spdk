@@ -1,9 +1,10 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2017 Intel Corporation.
+ *   Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES.
  *   All rights reserved.
  */
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "common/lib/ut_multithread.c"
 #include "unit/lib/json_mock.c"
@@ -24,6 +25,16 @@ DEFINE_STUB(spdk_memory_domain_get_dma_device_id, const char *, (struct spdk_mem
 	    "test_domain");
 DEFINE_STUB(spdk_memory_domain_get_dma_device_type, enum spdk_dma_device_type,
 	    (struct spdk_memory_domain *domain), 0);
+DEFINE_STUB_V(spdk_accel_sequence_finish,
+	      (struct spdk_accel_sequence *seq, spdk_accel_completion_cb cb_fn, void *cb_arg));
+DEFINE_STUB_V(spdk_accel_sequence_abort, (struct spdk_accel_sequence *seq));
+DEFINE_STUB_V(spdk_accel_sequence_reverse, (struct spdk_accel_sequence *seq));
+DEFINE_STUB(spdk_accel_append_copy, int,
+	    (struct spdk_accel_sequence **seq, struct spdk_io_channel *ch, struct iovec *dst_iovs,
+	     uint32_t dst_iovcnt, struct spdk_memory_domain *dst_domain, void *dst_domain_ctx,
+	     struct iovec *src_iovs, uint32_t src_iovcnt, struct spdk_memory_domain *src_domain,
+	     void *src_domain_ctx, spdk_accel_step_cb cb_fn, void *cb_arg), 0);
+DEFINE_STUB(spdk_accel_get_memory_domain, struct spdk_memory_domain *, (void), NULL);
 
 DEFINE_RETURN_MOCK(spdk_memory_domain_pull_data, int);
 int
@@ -49,15 +60,29 @@ spdk_memory_domain_push_data(struct spdk_memory_domain *dst_domain, void *dst_do
 	return 0;
 }
 
+static int g_accel_io_device;
+
+struct spdk_io_channel *
+spdk_accel_get_io_channel(void)
+{
+	return spdk_get_io_channel(&g_accel_io_device);
+}
+
 struct ut_bdev {
 	struct spdk_bdev	bdev;
 	void			*io_target;
 };
 
+struct ut_bdev_io {
+	TAILQ_ENTRY(ut_bdev_io)		link;
+};
+
 struct ut_bdev_channel {
-	TAILQ_HEAD(, spdk_bdev_io)	outstanding_io;
+	TAILQ_HEAD(, ut_bdev_io)	outstanding_io;
 	uint32_t			outstanding_cnt;
 	uint32_t			avail_cnt;
+	struct spdk_thread		*thread;
+	TAILQ_ENTRY(ut_bdev_channel)	link;
 };
 
 int g_io_device;
@@ -71,6 +96,18 @@ bool g_fini_start_called = true;
 int g_status = 0;
 int g_count = 0;
 struct spdk_histogram_data *g_histogram = NULL;
+TAILQ_HEAD(, ut_bdev_channel) g_ut_channels;
+
+static int
+ut_accel_ch_create_cb(void *io_device, void *ctx)
+{
+	return 0;
+}
+
+static void
+ut_accel_ch_destroy_cb(void *io_device, void *ctx)
+{
+}
 
 static int
 stub_create_ch(void *io_device, void *ctx_buf)
@@ -90,12 +127,19 @@ stub_create_ch(void *io_device, void *ctx_buf)
 	 *  value to something much smaller to induce ENOMEM conditions.
 	 */
 	ch->avail_cnt = 2048;
+	ch->thread = spdk_get_thread();
+
+	TAILQ_INSERT_TAIL(&g_ut_channels, ch, link);
+
 	return 0;
 }
 
 static void
 stub_destroy_ch(void *io_device, void *ctx_buf)
 {
+	struct ut_bdev_channel *ch = ctx_buf;
+
+	TAILQ_REMOVE(&g_ut_channels, ch, link);
 }
 
 static struct spdk_io_channel *
@@ -117,23 +161,40 @@ stub_destruct(void *ctx)
 }
 
 static void
+stub_reset_channel(void *ctx)
+{
+	struct ut_bdev_channel *ch = ctx;
+	struct ut_bdev_io *bio;
+
+	while (!TAILQ_EMPTY(&ch->outstanding_io)) {
+		bio = TAILQ_FIRST(&ch->outstanding_io);
+		TAILQ_REMOVE(&ch->outstanding_io, bio, link);
+		ch->outstanding_cnt--;
+		spdk_bdev_io_complete(spdk_bdev_io_from_ctx(bio), SPDK_BDEV_IO_STATUS_ABORTED);
+		ch->avail_cnt++;
+	}
+}
+
+static void
 stub_submit_request(struct spdk_io_channel *_ch, struct spdk_bdev_io *bdev_io)
 {
-	struct ut_bdev_channel *ch = spdk_io_channel_get_ctx(_ch);
+	struct ut_bdev_channel *ch = spdk_io_channel_get_ctx(_ch), *tmp_ch;
 	struct spdk_bdev_io *io;
+	struct ut_bdev_io *bio;
 
 	if (bdev_io->type == SPDK_BDEV_IO_TYPE_RESET) {
-		while (!TAILQ_EMPTY(&ch->outstanding_io)) {
-			io = TAILQ_FIRST(&ch->outstanding_io);
-			TAILQ_REMOVE(&ch->outstanding_io, io, module_link);
-			ch->outstanding_cnt--;
-			spdk_bdev_io_complete(io, SPDK_BDEV_IO_STATUS_ABORTED);
-			ch->avail_cnt++;
+		TAILQ_FOREACH(tmp_ch, &g_ut_channels, link) {
+			if (spdk_get_thread() == tmp_ch->thread) {
+				stub_reset_channel(tmp_ch);
+			} else {
+				spdk_thread_send_msg(tmp_ch->thread, stub_reset_channel, tmp_ch);
+			}
 		}
 	} else if (bdev_io->type == SPDK_BDEV_IO_TYPE_ABORT) {
-		TAILQ_FOREACH(io, &ch->outstanding_io, module_link) {
+		TAILQ_FOREACH(bio, &ch->outstanding_io, link) {
+			io = spdk_bdev_io_from_ctx(bio);
 			if (io == bdev_io->u.abort.bio_to_abort) {
-				TAILQ_REMOVE(&ch->outstanding_io, io, module_link);
+				TAILQ_REMOVE(&ch->outstanding_io, bio, link);
 				ch->outstanding_cnt--;
 				spdk_bdev_io_complete(io, SPDK_BDEV_IO_STATUS_ABORTED);
 				ch->avail_cnt++;
@@ -148,7 +209,7 @@ stub_submit_request(struct spdk_io_channel *_ch, struct spdk_bdev_io *bdev_io)
 	}
 
 	if (ch->avail_cnt > 0) {
-		TAILQ_INSERT_TAIL(&ch->outstanding_io, bdev_io, module_link);
+		TAILQ_INSERT_TAIL(&ch->outstanding_io, (struct ut_bdev_io *)bdev_io->driver_ctx, link);
 		ch->outstanding_cnt++;
 		ch->avail_cnt--;
 	} else {
@@ -161,6 +222,7 @@ stub_complete_io(void *io_target, uint32_t num_to_complete)
 {
 	struct spdk_io_channel *_ch = spdk_get_io_channel(io_target);
 	struct ut_bdev_channel *ch = spdk_io_channel_get_ctx(_ch);
+	struct ut_bdev_io *bio;
 	struct spdk_bdev_io *io;
 	bool complete_all = (num_to_complete == 0);
 	uint32_t num_completed = 0;
@@ -169,8 +231,9 @@ stub_complete_io(void *io_target, uint32_t num_to_complete)
 		if (TAILQ_EMPTY(&ch->outstanding_io)) {
 			break;
 		}
-		io = TAILQ_FIRST(&ch->outstanding_io);
-		TAILQ_REMOVE(&ch->outstanding_io, io, module_link);
+		bio = TAILQ_FIRST(&ch->outstanding_io);
+		TAILQ_REMOVE(&ch->outstanding_io, bio, link);
+		io = spdk_bdev_io_from_ctx(bio);
 		ch->outstanding_cnt--;
 		spdk_bdev_io_complete(io, SPDK_BDEV_IO_STATUS_SUCCESS);
 		ch->avail_cnt++;
@@ -219,6 +282,12 @@ fini_start(void)
 	g_fini_start_called = true;
 }
 
+static int
+get_ctx_size(void)
+{
+	return sizeof(struct ut_bdev_io);
+}
+
 struct spdk_bdev_module bdev_ut_if = {
 	.name = "bdev_ut",
 	.module_init = module_init,
@@ -226,6 +295,7 @@ struct spdk_bdev_module bdev_ut_if = {
 	.async_init = true,
 	.init_complete = init_complete,
 	.fini_start = fini_start,
+	.get_ctx_size = get_ctx_size,
 };
 
 SPDK_BDEV_MODULE_REGISTER(bdev_ut, &bdev_ut_if)
@@ -273,6 +343,11 @@ _bdev_event_cb(enum spdk_bdev_event_type type, struct spdk_bdev *bdev,
 			*(bool *)event_ctx = true;
 		}
 		break;
+	case SPDK_BDEV_EVENT_RESIZE:
+		if (event_ctx != NULL) {
+			*(int *)event_ctx += 1;
+		}
+		break;
 	default:
 		CU_ASSERT(false);
 		break;
@@ -283,13 +358,21 @@ static void
 setup_test(void)
 {
 	bool done = false;
+	int rc;
+
+	TAILQ_INIT(&g_ut_channels);
 
 	allocate_cores(BDEV_UT_NUM_THREADS);
 	allocate_threads(BDEV_UT_NUM_THREADS);
 	set_thread(0);
+
+	rc = spdk_iobuf_initialize();
+	CU_ASSERT(rc == 0);
 	spdk_bdev_initialize(bdev_init_cb, &done);
 	spdk_io_device_register(&g_io_device, stub_create_ch, stub_destroy_ch,
 				sizeof(struct ut_bdev_channel), NULL);
+	spdk_io_device_register(&g_accel_io_device, ut_accel_ch_create_cb,
+				ut_accel_ch_destroy_cb, 0, NULL);
 	register_bdev(&g_bdev, "ut_bdev", &g_io_device);
 	spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, NULL, &g_desc);
 }
@@ -310,12 +393,15 @@ teardown_test(void)
 	unregister_bdev(&g_bdev);
 	spdk_io_device_unregister(&g_io_device, NULL);
 	spdk_bdev_finish(finish_cb, NULL);
+	spdk_io_device_unregister(&g_accel_io_device, NULL);
+	spdk_iobuf_finish(finish_cb, NULL);
 	poll_threads();
 	memset(&g_bdev, 0, sizeof(g_bdev));
 	CU_ASSERT(g_teardown_done == true);
 	g_teardown_done = false;
 	free_threads();
 	free_cores();
+	CU_ASSERT(TAILQ_EMPTY(&g_ut_channels))
 }
 
 static uint32_t
@@ -434,6 +520,55 @@ unregister_and_close(void)
 	CU_ASSERT(remove_notify == false);
 
 	/* The unregister should have completed */
+	CU_ASSERT(done == true);
+
+	/* Restore the original g_bdev so that we can use teardown_test(). */
+	register_bdev(&g_bdev, "ut_bdev", &g_io_device);
+	spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, NULL, &g_desc);
+	teardown_test();
+}
+
+static void
+unregister_and_close_different_threads(void)
+{
+	bool done;
+	struct spdk_bdev_desc *desc = NULL;
+
+	setup_test();
+	set_thread(0);
+
+	/* setup_test() automatically opens the bdev,
+	 * but this test needs to do that in a different
+	 * way. */
+	spdk_bdev_close(g_desc);
+	poll_threads();
+
+	set_thread(1);
+	spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, NULL, &desc);
+	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	done = false;
+
+	set_thread(0);
+	spdk_bdev_unregister(&g_bdev.bdev, _bdev_unregistered, &done);
+
+	/* Poll the threads to allow all events to be processed */
+	poll_threads();
+
+	/* Make sure the bdev was not unregistered. We still have a
+	 * descriptor open */
+	CU_ASSERT(done == false);
+
+	/* Close the descriptor on thread 1.  Poll the thread and confirm the
+	 * unregister did not complete, since it was unregistered on thread 0.
+	 */
+	set_thread(1);
+	spdk_bdev_close(desc);
+	poll_thread(1);
+	CU_ASSERT(done == false);
+
+	/* Now poll thread 0 and confirm the unregister completed. */
+	set_thread(0);
+	poll_thread(0);
 	CU_ASSERT(done == true);
 
 	/* Restore the original g_bdev so that we can use teardown_test(). */
@@ -567,7 +702,7 @@ aborted_reset_no_outstanding_io(void)
 	io_ch[0] = spdk_bdev_get_io_channel(g_desc);
 	bdev_ch[0] = spdk_io_channel_get_ctx(io_ch[0]);
 	bdev[0] = bdev_ch[0]->bdev;
-	bdev[0]->reset_io_drain_timeout = BDEV_RESET_IO_DRAIN_RECOMMENDED_VALUE;
+	bdev[0]->reset_io_drain_timeout = SPDK_BDEV_RESET_IO_DRAIN_RECOMMENDED_VALUE;
 	CU_ASSERT(io_ch[0] != NULL);
 	spdk_bdev_reset(g_desc, io_ch[0], aborted_reset_done, &status1);
 	poll_threads();
@@ -581,7 +716,7 @@ aborted_reset_no_outstanding_io(void)
 	io_ch[1] = spdk_bdev_get_io_channel(g_desc);
 	bdev_ch[1] = spdk_io_channel_get_ctx(io_ch[1]);
 	bdev[1] = bdev_ch[1]->bdev;
-	bdev[1]->reset_io_drain_timeout = BDEV_RESET_IO_DRAIN_RECOMMENDED_VALUE;
+	bdev[1]->reset_io_drain_timeout = SPDK_BDEV_RESET_IO_DRAIN_RECOMMENDED_VALUE;
 	CU_ASSERT(io_ch[1] != NULL);
 	spdk_bdev_reset(g_desc, io_ch[1], aborted_reset_done, &status2);
 	poll_threads();
@@ -714,10 +849,12 @@ count_queued_resets(void *io_target)
 {
 	struct spdk_io_channel *_ch = spdk_get_io_channel(io_target);
 	struct ut_bdev_channel *ch = spdk_io_channel_get_ctx(_ch);
+	struct ut_bdev_io *bio;
 	struct spdk_bdev_io *io;
 	uint32_t submitted_resets = 0;
 
-	TAILQ_FOREACH(io, &ch->outstanding_io, module_link) {
+	TAILQ_FOREACH(bio, &ch->outstanding_io, link) {
+		io = spdk_bdev_io_from_ctx(bio);
 		if (io->type == SPDK_BDEV_IO_TYPE_RESET) {
 			submitted_resets++;
 		}
@@ -777,7 +914,7 @@ reset_completions(void)
 
 	/* Test case 2) no outstanding IO are present. Reset should perform one iteration over
 	* channels and then be skipped. */
-	bdev->reset_io_drain_timeout = BDEV_RESET_IO_DRAIN_RECOMMENDED_VALUE;
+	bdev->reset_io_drain_timeout = SPDK_BDEV_RESET_IO_DRAIN_RECOMMENDED_VALUE;
 	status_reset = SPDK_BDEV_IO_STATUS_PENDING;
 
 	rc = spdk_bdev_reset(g_desc, io_ch, io_during_io_done, &status_reset);
@@ -880,7 +1017,6 @@ basic_qos(void)
 	bdev = &g_bdev.bdev;
 	bdev->internal.qos = calloc(1, sizeof(*bdev->internal.qos));
 	SPDK_CU_ASSERT_FATAL(bdev->internal.qos != NULL);
-	TAILQ_INIT(&bdev->internal.qos->queued);
 	/*
 	 * Enable read/write IOPS, read only byte per second and
 	 * read/write byte per second rate limits.
@@ -925,12 +1061,13 @@ basic_qos(void)
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(status == SPDK_BDEV_IO_STATUS_PENDING);
 	poll_threads();
-	/* Complete I/O on thread 1. This should not complete the I/O we submitted */
+	/* Complete I/O on thread 0. This should not complete the I/O we submitted. */
+	set_thread(0);
 	stub_complete_io(g_bdev.io_target, 0);
 	poll_threads();
 	CU_ASSERT(status == SPDK_BDEV_IO_STATUS_PENDING);
-	/* Now complete I/O on thread 0 */
-	set_thread(0);
+	/* Now complete I/O on original thread 1. */
+	set_thread(1);
 	poll_threads();
 	stub_complete_io(g_bdev.io_target, 0);
 	poll_threads();
@@ -1054,7 +1191,7 @@ io_during_qos_queue(void)
 	bdev = &g_bdev.bdev;
 	bdev->internal.qos = calloc(1, sizeof(*bdev->internal.qos));
 	SPDK_CU_ASSERT_FATAL(bdev->internal.qos != NULL);
-	TAILQ_INIT(&bdev->internal.qos->queued);
+
 	/*
 	 * Enable read/write IOPS, read only byte per sec, write only
 	 * byte per sec and read/write byte per sec rate limits.
@@ -1157,7 +1294,7 @@ io_during_qos_reset(void)
 	bdev = &g_bdev.bdev;
 	bdev->internal.qos = calloc(1, sizeof(*bdev->internal.qos));
 	SPDK_CU_ASSERT_FATAL(bdev->internal.qos != NULL);
-	TAILQ_INIT(&bdev->internal.qos->queued);
+
 	/*
 	 * Enable read/write IOPS, write only byte per sec and
 	 * read/write byte per second rate limits.
@@ -2042,6 +2179,7 @@ bdev_set_io_timeout_mt(void)
 	unregister_bdev(&g_bdev);
 	spdk_io_device_unregister(&g_io_device, NULL);
 	spdk_bdev_finish(finish_cb, NULL);
+	spdk_iobuf_finish(finish_cb, NULL);
 	poll_threads();
 	memset(&g_bdev, 0, sizeof(g_bdev));
 	CU_ASSERT(g_teardown_done == true);
@@ -2062,13 +2200,13 @@ io_done2(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 }
 
 static void
-lock_lba_range_done(void *ctx, int status)
+lock_lba_range_done(struct lba_range *range, void *ctx, int status)
 {
 	g_lock_lba_range_done = true;
 }
 
 static void
-unlock_lba_range_done(void *ctx, int status)
+unlock_lba_range_done(struct lba_range *range, void *ctx, int status)
 {
 	g_unlock_lba_range_done = true;
 }
@@ -2286,19 +2424,342 @@ unregister_during_reset(void)
 	teardown_test();
 }
 
+static void
+bdev_init_wt_cb(void *done, int rc)
+{
+}
+
+static int
+wrong_thread_setup(void)
+{
+	allocate_cores(1);
+	allocate_threads(2);
+	set_thread(0);
+
+	spdk_io_device_register(&g_accel_io_device, ut_accel_ch_create_cb,
+				ut_accel_ch_destroy_cb, 0, NULL);
+	spdk_bdev_initialize(bdev_init_wt_cb, NULL);
+	spdk_io_device_register(&g_io_device, stub_create_ch, stub_destroy_ch,
+				sizeof(struct ut_bdev_channel), NULL);
+
+	set_thread(1);
+
+	return 0;
+}
+
+static int
+wrong_thread_teardown(void)
+{
+	int rc = 0;
+
+	set_thread(0);
+
+	g_teardown_done = false;
+	spdk_io_device_unregister(&g_io_device, NULL);
+	spdk_bdev_finish(finish_cb, NULL);
+	poll_threads();
+	memset(&g_bdev, 0, sizeof(g_bdev));
+	if (!g_teardown_done) {
+		fprintf(stderr, "%s:%d %s: teardown not done\n", __FILE__, __LINE__, __func__);
+		rc = -1;
+	}
+	g_teardown_done = false;
+
+	spdk_io_device_unregister(&g_accel_io_device, NULL);
+	free_threads();
+	free_cores();
+
+	return rc;
+}
+
+static void
+_bdev_unregistered_wt(void *ctx, int rc)
+{
+	struct spdk_thread **threadp = ctx;
+
+	*threadp = spdk_get_thread();
+}
+
+static void
+spdk_bdev_register_wt(void)
+{
+	struct spdk_bdev bdev = { 0 };
+	int rc;
+	struct spdk_thread *unreg_thread;
+
+	bdev.name = "wt_bdev";
+	bdev.fn_table = &fn_table;
+	bdev.module = &bdev_ut_if;
+	bdev.blocklen = 4096;
+	bdev.blockcnt = 1024;
+
+	/* Can register only on app thread */
+	rc = spdk_bdev_register(&bdev);
+	CU_ASSERT(rc == -EINVAL);
+
+	/* Can unregister on any thread */
+	set_thread(0);
+	rc = spdk_bdev_register(&bdev);
+	CU_ASSERT(rc == 0);
+	set_thread(1);
+	unreg_thread = NULL;
+	spdk_bdev_unregister(&bdev, _bdev_unregistered_wt, &unreg_thread);
+	poll_threads();
+	CU_ASSERT(unreg_thread == spdk_get_thread());
+
+	/* Can unregister by name on any thread */
+	set_thread(0);
+	rc = spdk_bdev_register(&bdev);
+	CU_ASSERT(rc == 0);
+	set_thread(1);
+	unreg_thread = NULL;
+	rc = spdk_bdev_unregister_by_name(bdev.name, bdev.module, _bdev_unregistered_wt,
+					  &unreg_thread);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(unreg_thread == spdk_get_thread());
+}
+
+static void
+wait_for_examine_cb(void *arg)
+{
+	struct spdk_thread **thread = arg;
+
+	*thread = spdk_get_thread();
+}
+
+static void
+spdk_bdev_examine_wt(void)
+{
+	int rc;
+	bool save_auto_examine = g_bdev_opts.bdev_auto_examine;
+	struct spdk_thread *thread;
+
+	g_bdev_opts.bdev_auto_examine = false;
+
+	set_thread(0);
+	register_bdev(&g_bdev, "ut_bdev_wt", &g_io_device);
+	CU_ASSERT(spdk_bdev_get_by_name("ut_bdev_wt") != NULL);
+	set_thread(1);
+
+	/* Can examine only on the app thread */
+	rc = spdk_bdev_examine("ut_bdev_wt");
+	CU_ASSERT(rc == -EINVAL);
+	unregister_bdev(&g_bdev);
+	CU_ASSERT(spdk_bdev_get_by_name("ut_bdev_wt") == NULL);
+
+	/* Can wait for examine on app thread, callback called on app thread. */
+	set_thread(0);
+	register_bdev(&g_bdev, "ut_bdev_wt", &g_io_device);
+	CU_ASSERT(spdk_bdev_get_by_name("ut_bdev_wt") != NULL);
+	thread = NULL;
+	rc = spdk_bdev_wait_for_examine(wait_for_examine_cb, &thread);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(thread == spdk_get_thread());
+	unregister_bdev(&g_bdev);
+	CU_ASSERT(spdk_bdev_get_by_name("ut_bdev_wt") == NULL);
+
+	/* Can wait for examine on non-app thread, callback called on same thread. */
+	set_thread(0);
+	register_bdev(&g_bdev, "ut_bdev_wt", &g_io_device);
+	CU_ASSERT(spdk_bdev_get_by_name("ut_bdev_wt") != NULL);
+	thread = NULL;
+	rc = spdk_bdev_wait_for_examine(wait_for_examine_cb, &thread);
+	CU_ASSERT(rc == 0);
+	poll_threads();
+	CU_ASSERT(thread == spdk_get_thread());
+	unregister_bdev(&g_bdev);
+	CU_ASSERT(spdk_bdev_get_by_name("ut_bdev_wt") == NULL);
+
+	unregister_bdev(&g_bdev);
+	g_bdev_opts.bdev_auto_examine = save_auto_examine;
+}
+
+static void
+event_notify_and_close(void)
+{
+	int resize_notify_count = 0;
+	struct spdk_bdev_desc *desc = NULL;
+	struct spdk_bdev *bdev;
+	int rc;
+
+	setup_test();
+	set_thread(0);
+
+	/* setup_test() automatically opens the bdev, but this test needs to do
+	 * that in a different way. */
+	spdk_bdev_close(g_desc);
+	poll_threads();
+
+	set_thread(1);
+
+	rc = spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, &resize_notify_count, &desc);
+	CU_ASSERT(rc == 0);
+	SPDK_CU_ASSERT_FATAL(desc != NULL);
+
+	bdev = spdk_bdev_desc_get_bdev(desc);
+	SPDK_CU_ASSERT_FATAL(bdev != NULL);
+
+	/* Test a normal case that a resize event is notified. */
+	set_thread(0);
+
+	rc = spdk_bdev_notify_blockcnt_change(bdev, 1024 * 2);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(bdev->blockcnt == 1024 * 2);
+	CU_ASSERT(desc->refs == 1);
+	CU_ASSERT(resize_notify_count == 0);
+
+	poll_threads();
+
+	CU_ASSERT(desc->refs == 0);
+	CU_ASSERT(resize_notify_count == 1);
+
+	/* Test a complex case if the bdev is closed after two event_notify messages are sent,
+	 * then both event_notify messages are discarded and the desc is freed.
+	 */
+	rc = spdk_bdev_notify_blockcnt_change(bdev, 1024 * 3);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(bdev->blockcnt == 1024 * 3);
+	CU_ASSERT(desc->refs == 1);
+	CU_ASSERT(resize_notify_count == 1);
+
+	rc = spdk_bdev_notify_blockcnt_change(bdev, 1024 * 4);
+	CU_ASSERT(rc == 0);
+	CU_ASSERT(bdev->blockcnt == 1024 * 4);
+	CU_ASSERT(desc->refs == 2);
+	CU_ASSERT(resize_notify_count == 1);
+
+	set_thread(1);
+
+	spdk_bdev_close(desc);
+	CU_ASSERT(desc->closed == true);
+	CU_ASSERT(desc->refs == 2);
+	CU_ASSERT(resize_notify_count == 1);
+
+	poll_threads();
+
+	CU_ASSERT(resize_notify_count == 1);
+
+	set_thread(0);
+
+	/* Restore g_desc. Then, we can execute teardown_test(). */
+	spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, NULL, &g_desc);
+	teardown_test();
+}
+
+/* There was a bug that bdev_channel_poll_qos() called spdk_for_each_channel()
+ * after spdk_io_device_unregister() is called for a bdev.
+ *
+ * This occurred in the following sequence.
+ * - There was a bdev and a channel for it.
+ * - QoS was enabled and started.
+ * - spdk_bdev_unregister() was called. However, there was a open descriptor.
+ *   Hence, remove notification was sent and unregistration was pending.
+ * - Receiving a event notification, spdk_put_io_channel() and spdk_bdev_close() were
+ *   called. In spdk_bdev_close(), the existing QoS was unbound and a message was sent
+ *   to it, and then the pending spdk_io_device_unregister() was finally executed.
+ * - If bdev_channel_poll_qos() was executed before the message was processed,
+ *   bdev_channel_poll_qos() called spdk_bdev_for_each_channel() and hit assert().
+ *
+ * The fix was in this case bdev_channel_poll_qos() returned immediately because QoS
+ * was not enabled. bdev_qos_destroy() created a new disabled QoS and swapped it with
+ * the existing QoS.
+ *
+ * This test case was added to avoid degradation in future.
+ */
+static void
+unregister_and_qos_poller(void)
+{
+	struct spdk_io_channel *io_ch;
+	struct spdk_bdev_channel *bdev_ch;
+	struct spdk_bdev_desc *desc = NULL;
+	struct spdk_bdev_qos *old_qos;
+	uint64_t limits[SPDK_BDEV_QOS_NUM_RATE_LIMIT_TYPES] = {};
+	bool remove_notify = false, done_unregister = false;
+	int status = -1, rc;
+
+	setup_test();
+	set_thread(0);
+
+	MOCK_SET(spdk_get_ticks, 10);
+
+	/* setup_test() automatically opens the bdev, but this test needs to do
+	 * that in a different way.
+	 */
+	spdk_bdev_close(g_desc);
+	poll_threads();
+
+	/* We want to get remove event notification to check if unregistration
+	 * is deferred.
+	 */
+	spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, &remove_notify, &desc);
+	SPDK_CU_ASSERT_FATAL(desc != NULL);
+	CU_ASSERT(remove_notify == false);
+
+	io_ch = spdk_bdev_get_io_channel(desc);
+	SPDK_CU_ASSERT_FATAL(io_ch != NULL);
+	bdev_ch = spdk_io_channel_get_ctx(io_ch);
+
+	limits[SPDK_BDEV_QOS_RW_IOPS_RATE_LIMIT] = 10000;
+	limits[SPDK_BDEV_QOS_RW_BPS_RATE_LIMIT] = 0;
+	limits[SPDK_BDEV_QOS_R_BPS_RATE_LIMIT] = 0;
+	limits[SPDK_BDEV_QOS_W_BPS_RATE_LIMIT] = 0;
+	spdk_bdev_set_qos_rate_limits(&g_bdev.bdev, limits, qos_dynamic_enable_done, &status);
+	poll_threads();
+	CU_ASSERT(status == 0);
+	CU_ASSERT((bdev_ch->flags & BDEV_CH_QOS_ENABLED) != 0);
+
+	old_qos = g_bdev.bdev.internal.qos;
+	CU_ASSERT(old_qos != NULL);
+
+	spdk_bdev_unregister(&g_bdev.bdev, _bdev_unregistered, &done_unregister);
+	CU_ASSERT(done_unregister == false);
+	CU_ASSERT(remove_notify == false);
+
+	poll_threads();
+	CU_ASSERT(done_unregister == false);
+	CU_ASSERT(remove_notify == true);
+
+	spdk_put_io_channel(io_ch);
+	spdk_bdev_close(desc);
+
+	CU_ASSERT(g_bdev.bdev.internal.qos != NULL);
+	CU_ASSERT(g_bdev.bdev.internal.qos->thread == NULL);
+	CU_ASSERT(old_qos != g_bdev.bdev.internal.qos);
+
+	/* bdev_channel_poll_qos() has a chance to be executed in this small window. */
+	spdk_delay_us(SPDK_BDEV_QOS_TIMESLICE_IN_USEC);
+
+	rc = bdev_channel_poll_qos(&g_bdev.bdev);
+	CU_ASSERT(rc == SPDK_POLLER_IDLE);
+
+	poll_threads();
+
+	CU_ASSERT(done_unregister == true);
+
+	/* Restore the original g_bdev so that we can use teardown_test(). */
+	set_thread(0);
+	register_bdev(&g_bdev, "ut_bdev", &g_io_device);
+	spdk_bdev_open_ext("ut_bdev", true, _bdev_event_cb, NULL, &g_desc);
+	teardown_test();
+}
+
 int
 main(int argc, char **argv)
 {
 	CU_pSuite	suite = NULL;
+	CU_pSuite	suite_wt = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("bdev", NULL, NULL);
+	suite_wt = CU_add_suite("bdev_wrong_thread", wrong_thread_setup, wrong_thread_teardown);
 
 	CU_ADD_TEST(suite, basic);
 	CU_ADD_TEST(suite, unregister_and_close);
+	CU_ADD_TEST(suite, unregister_and_close_different_threads);
 	CU_ADD_TEST(suite, basic_qos);
 	CU_ADD_TEST(suite, put_channel_during_reset);
 	CU_ADD_TEST(suite, aborted_reset);
@@ -2316,10 +2777,12 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, bdev_set_io_timeout_mt);
 	CU_ADD_TEST(suite, lock_lba_range_then_submit_io);
 	CU_ADD_TEST(suite, unregister_during_reset);
+	CU_ADD_TEST(suite_wt, spdk_bdev_register_wt);
+	CU_ADD_TEST(suite_wt, spdk_bdev_examine_wt);
+	CU_ADD_TEST(suite, event_notify_and_close);
+	CU_ADD_TEST(suite, unregister_and_qos_poller);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

@@ -1,6 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2008-2012 Daisuke Aoyama <aoyama@peach.ne.jp>.
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -80,7 +80,7 @@ struct spdk_conf_section *spdk_conf_next_section(struct spdk_conf_section *sp);
  * \param sp The section of the configuration.
  * \param name_prefix Prefix name to match.
  *
- * \return ture on success, false on failure.
+ * \return true on success, false on failure.
  */
 bool spdk_conf_section_match_prefix(const struct spdk_conf_section *sp, const char *name_prefix);
 

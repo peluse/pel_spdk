@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2015 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -104,6 +104,7 @@ extern "C" {
 #define PCI_DEVICE_ID_VIRTIO_SCSI_LEGACY 0x1004
 #define PCI_DEVICE_ID_VIRTIO_BLK_MODERN	0x1042
 #define PCI_DEVICE_ID_VIRTIO_SCSI_MODERN 0x1048
+#define PCI_DEVICE_ID_VIRTIO_FS		0x105A
 
 #define PCI_DEVICE_ID_VIRTIO_VHOST_USER 0x1017
 

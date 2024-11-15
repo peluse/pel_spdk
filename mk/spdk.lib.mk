@@ -1,5 +1,5 @@
 #  SPDX-License-Identifier: BSD-3-Clause
-#  Copyright (c) Intel Corporation.
+#  Copyright (C) 2015 Intel Corporation.
 #  All rights reserved.
 #
 
@@ -53,9 +53,7 @@ else
 BUILD_DEP := $(DEP)
 endif
 
-ifeq ($(SPDK_NO_LIB_DEPS),)
 SPDK_DEP_LIBS = $(call spdk_lib_list_to_shared_libs,$(DEPDIRS-$(LIBNAME)))
-endif
 
 ifeq ($(CXX_SRCS),)
 COMPILER=$(CC)

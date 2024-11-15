@@ -3,8 +3,8 @@
 The spdk_top application is designed to resemble the standard top in that it provides a real-time insights into CPU cores usage by SPDK
 lightweight threads and pollers. Have you ever wondered which CPU core is used most by your SPDK instance? Are you building your own bdev
 or library and want to know if your code is running efficiently? Are your new pollers busy most of the time? The spdk_top application uses
-RPC calls to collect performance metrics and displays them in a report that you can analyze and determine if your code is running efficiently
-so that you can tune your implementation and get more from SPDK.
+[RPC](https://spdk.io/doc/jsonrpc.html) calls to collect performance metrics and displays them in a report that you can analyze and determine
+if your code is running efficiently so that you can tune your implementation and get more from SPDK.
 
 Why doesn't the classic top utility work for SPDK? SPDK uses a polled-mode design; a reactor thread running on each CPU core assigned to
 an SPDK application schedules SPDK lightweight threads and pollers to run on the CPU core. Therefore, the standard Linux top utility is
@@ -14,6 +14,10 @@ polling for work. The utility relies on instrumentation added to pollers to trac
 spdk_top utility gets the fine grained metrics from the pollers, analyzes and report the metrics on a per poller, thread and core basis.
 This information enables users to identify CPU cores that are busy doing real work so that they can determine if the application
 needs more or less CPU resources.
+
+spdk_top uses RPCs to communicate with the app it is viewing, so it will work only with those that run RPC server and support
+`thread_get_stats`, `thread_get_pollers`, `framework_get_reactors` methods. Apps currently meeting this criteria:
+spdk_tgt, nvmf_tgt, vhost, iscsi_tgt.
 
 ## Run spdk_top
 
@@ -83,4 +87,9 @@ window allows to select a thread and display thread details pop-up on top of it.
 
 ## Help Window
 
-Help window pop-up can be invoked by pressing H key inside any tab. It contains explanations for each key used inside the spdk_top application.
+Help window pop-up can be invoked by pressing 'h' key inside any tab. It contains explanations for each key used inside the spdk_top application.
+
+## Scheduler Pop-up
+
+Current scheduler information may be displayed with 'g' key inside all tabs. It contains scheduler name and period along with governor
+name.

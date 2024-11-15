@@ -1,8 +1,12 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2018 Intel Corporation
+#  All rights reserved.
+#
+
 spdkcli_job="$rootdir/test/spdkcli/spdkcli_job.py"
 spdk_clear_config_py="$rootdir/test/json_config/clear_config.py"
 
-function on_error_exit() {
-	set +e
+function cleanup() {
 	if [ -n "$spdk_tgt_pid" ]; then
 		killprocess $spdk_tgt_pid
 	fi
@@ -15,9 +19,7 @@ function on_error_exit() {
 	if [ -n "$vhost_tgt_pid" ]; then
 		killprocess $vhost_tgt_pid
 	fi
-	rm -f $testdir/${MATCH_FILE} $testdir/match_files/spdkcli_details_vhost.test /tmp/sample_aio /tmp/sample_pmem
-	print_backtrace
-	exit 1
+	rm -f $testdir/${MATCH_FILE} $testdir/match_files/spdkcli_details_vhost.test /tmp/sample_aio
 }
 
 function run_spdk_tgt() {
@@ -42,4 +44,8 @@ function check_match() {
 	$rootdir/scripts/spdkcli.py ll $SPDKCLI_BRANCH > $testdir/match_files/${MATCH_FILE}
 	$rootdir/test/app/match/match $testdir/match_files/${MATCH_FILE}.match
 	rm -f $testdir/match_files/${MATCH_FILE}
+}
+
+function wait_for_all_nvme_ctrls_to_detach() {
+	while (($(rpc_cmd bdev_nvme_get_controllers | jq '.|length') != 0)); do :; done
 }

@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2022 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -41,12 +41,13 @@ void ftl_l2p_set(struct spdk_ftl_dev *dev, uint64_t lba, ftl_addr addr);
 ftl_addr ftl_l2p_get(struct spdk_ftl_dev *dev, uint64_t lba);
 
 void ftl_l2p_clear(struct spdk_ftl_dev *dev, ftl_l2p_cb cb, void *cb_ctx);
-void ftl_l2p_unmap(struct spdk_ftl_dev *dev, ftl_l2p_cb cb, void *cb_ctx);
+void ftl_l2p_trim(struct spdk_ftl_dev *dev, ftl_l2p_cb cb, void *cb_ctx);
 void ftl_l2p_restore(struct spdk_ftl_dev *dev, ftl_l2p_cb cb, void *cb_ctx);
 void ftl_l2p_persist(struct spdk_ftl_dev *dev, ftl_l2p_cb cb, void *cb_ctx);
 void ftl_l2p_process(struct spdk_ftl_dev *dev);
 bool ftl_l2p_is_halted(struct spdk_ftl_dev *dev);
 void ftl_l2p_halt(struct spdk_ftl_dev *dev);
+void ftl_l2p_resume(struct spdk_ftl_dev *dev);
 
 void ftl_l2p_update_cache(struct spdk_ftl_dev *dev, uint64_t lba, ftl_addr new_addr,
 			  ftl_addr old_addr);

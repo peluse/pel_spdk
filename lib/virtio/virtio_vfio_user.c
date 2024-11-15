@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2022 Intel Corporation. All rights reserved.
  */
 
 #include "spdk/stdinc.h"
@@ -183,8 +183,10 @@ virtio_vfio_user_destruct_dev(struct virtio_dev *vdev)
 {
 	struct virtio_vfio_user_dev *dev = vdev->ctx;
 
-	spdk_vfio_user_release(dev->ctx);
-	free(dev);
+	if (dev) {
+		spdk_vfio_user_release(dev->ctx);
+		free(dev);
+	}
 }
 
 static uint16_t
@@ -227,15 +229,7 @@ virtio_vfio_user_setup_queue(struct virtio_dev *vdev, struct virtqueue *vq)
 	uint64_t queue_mem_phys_addr;
 	int rc;
 
-	/* To ensure physical address contiguity we make the queue occupy
-	 * only a single hugepage (2MB). As of Virtio 1.0, the queue size
-	 * always falls within this limit.
-	 */
-	if (vq->vq_ring_size > VALUE_2MB) {
-		return -ENOMEM;
-	}
-
-	queue_mem = spdk_zmalloc(vq->vq_ring_size, VALUE_2MB, NULL,
+	queue_mem = spdk_zmalloc(vq->vq_ring_size, VIRTIO_PCI_VRING_ALIGN, NULL,
 				 SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
 	if (queue_mem == NULL) {
 		return -ENOMEM;
@@ -401,7 +395,7 @@ virtio_vfio_user_dev_init(struct virtio_dev *vdev, const char *name, const char 
 	int rc;
 
 	if (name == NULL) {
-		SPDK_ERRLOG("No name gived for controller: %s\n", path);
+		SPDK_ERRLOG("No name given for controller: %s\n", path);
 		return -EINVAL;
 	}
 
@@ -428,7 +422,6 @@ virtio_vfio_user_dev_init(struct virtio_dev *vdev, const char *name, const char 
 	if (!dev->ctx) {
 		SPDK_ERRLOG("Error to setup %s as vfio device\n", path);
 		virtio_dev_destruct(vdev);
-		free(dev);
 		return -EINVAL;
 	}
 
@@ -438,8 +431,6 @@ virtio_vfio_user_dev_init(struct virtio_dev *vdev, const char *name, const char 
 	if (rc != 0) {
 		SPDK_ERRLOG("Read PCI CMD REG failed\n");
 		virtio_dev_destruct(vdev);
-		spdk_vfio_user_release(dev->ctx);
-		free(dev);
 		return rc;
 	}
 	cmd_reg |= 0x404;
@@ -448,8 +439,6 @@ virtio_vfio_user_dev_init(struct virtio_dev *vdev, const char *name, const char 
 	if (rc != 0) {
 		SPDK_ERRLOG("Write PCI CMD REG failed\n");
 		virtio_dev_destruct(vdev);
-		spdk_vfio_user_release(dev->ctx);
-		free(dev);
 		return rc;
 	}
 

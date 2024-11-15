@@ -1,3 +1,8 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2018 Intel Corporation.
+#  All rights reserved.
+
+
 def trace_enable_tpoint_group(client, name):
     """Enable trace on a specific tpoint group.
 
@@ -49,3 +54,12 @@ def trace_get_tpoint_group_mask(client):
         List of trace point group mask
     """
     return client.call('trace_get_tpoint_group_mask')
+
+
+def trace_get_info(client):
+    """Get name of shared memory file and list of the available trace point groups
+
+    Returns:
+        Name of shared memory file and list of the available trace point groups
+    """
+    return client.call('trace_get_info')

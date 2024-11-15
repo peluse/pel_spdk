@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2020 Intel Corporation
+#  All rights reserved.
+#
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
@@ -25,7 +28,7 @@ $rpc_py nvmf_subsystem_add_listener discovery -t $TEST_TRANSPORT -a $NVMF_FIRST_
 
 # Run abort application
 $SPDK_EXAMPLE_DIR/abort -r "trtype:$TEST_TRANSPORT adrfam:IPv4 traddr:$NVMF_FIRST_TARGET_IP trsvcid:$NVMF_PORT" \
-	-c 0x1 -t 1 -l warning -q 128
+	-c 0x1 -t 1 -l warning -q 128 "${NO_HUGE[@]}"
 
 # Clean up
 $rpc_py nvmf_delete_subsystem nqn.2016-06.io.spdk:cnode0

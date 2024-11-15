@@ -1,5 +1,5 @@
 #  SPDX-License-Identifier: BSD-3-Clause
-#  Copyright (c) Intel Corporation.
+#  Copyright (C) 2022 Intel Corporation.
 #  All rights reserved.
 #
 
@@ -9,4 +9,4 @@ TEST_FILE = ftl_sb_ut.c
 
 include $(SPDK_ROOT_DIR)/mk/spdk.unittest.mk
 
-CFLAGS += -I$(SPDK_ROOT_DIR)/lib/ftl
+CFLAGS += -I$(SPDK_ROOT_DIR)/lib/ftl -DUTEST

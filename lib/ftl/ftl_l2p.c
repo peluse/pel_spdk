@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2022 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -94,9 +94,9 @@ ftl_l2p_persist(struct spdk_ftl_dev *dev, ftl_l2p_cb cb, void *cb_ctx)
 }
 
 void
-ftl_l2p_unmap(struct spdk_ftl_dev *dev, ftl_l2p_cb cb, void *cb_ctx)
+ftl_l2p_trim(struct spdk_ftl_dev *dev, ftl_l2p_cb cb, void *cb_ctx)
 {
-	FTL_L2P_OP(unmap)(dev, cb, cb_ctx);
+	FTL_L2P_OP(trim)(dev, cb, cb_ctx);
 }
 
 void
@@ -121,6 +121,12 @@ ftl_l2p_is_halted(struct spdk_ftl_dev *dev)
 	}
 
 	return FTL_L2P_OP(is_halted)(dev);
+}
+
+void
+ftl_l2p_resume(struct spdk_ftl_dev *dev)
+{
+	return FTL_L2P_OP(resume)(dev);
 }
 
 void
@@ -191,7 +197,7 @@ ftl_l2p_update_cache(struct spdk_ftl_dev *dev, uint64_t lba, ftl_addr new_addr, 
 		uint64_t trim_seq_id = get_trim_seq_id(dev, lba);
 		uint64_t new_seq_id = ftl_nv_cache_get_chunk_from_addr(dev, new_addr)->md->seq_id;
 
-		/* Check if region hasn't been unmapped during IO */
+		/* Check if region hasn't been trimmed during IO */
 		if (new_seq_id < trim_seq_id) {
 			return;
 		}

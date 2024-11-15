@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2018 Intel Corporation. All rights reserved.
  *   Copyright (c) 2020 Mellanox Technologies LTD. All rights reserved.
  */
 
@@ -14,6 +14,9 @@
 #include "spdk/sock.h"
 #include "spdk/queue.h"
 #include "spdk/likely.h"
+#include "spdk/log.h"
+#include "spdk/trace.h"
+#include "spdk_internal/trace_defs.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,8 +25,10 @@ extern "C" {
 #define MAX_EVENTS_PER_POLL 32
 #define DEFAULT_SOCK_PRIORITY 0
 #define MIN_SOCK_PIPE_SIZE 1024
-#define MIN_SO_RCVBUF_SIZE (2 * 1024 * 1024)
-#define MIN_SO_SNDBUF_SIZE (2 * 1024 * 1024)
+#define DEFAULT_SO_RCVBUF_SIZE (2 * 1024 * 1024)
+#define DEFAULT_SO_SNDBUF_SIZE (2 * 1024 * 1024)
+#define MIN_SO_RCVBUF_SIZE (4 * 1024)
+#define MIN_SO_SNDBUF_SIZE (4 * 1024)
 #define IOV_BATCH_SIZE 64
 
 struct spdk_sock {
@@ -46,8 +51,15 @@ struct spdk_sock {
 	struct spdk_sock_impl_opts	impl_opts;
 };
 
+struct spdk_sock_group_provided_buf {
+	size_t						len;
+	void						*ctx;
+	STAILQ_ENTRY(spdk_sock_group_provided_buf)	link;
+};
+
 struct spdk_sock_group {
 	STAILQ_HEAD(, spdk_sock_group_impl)	group_impls;
+	STAILQ_HEAD(, spdk_sock_group_provided_buf) pool;
 	void					*ctx;
 };
 
@@ -65,10 +77,11 @@ struct spdk_sock_map {
 
 struct spdk_net_impl {
 	const char *name;
-	int priority;
 
 	int (*getaddr)(struct spdk_sock *sock, char *saddr, int slen, uint16_t *sport, char *caddr,
 		       int clen, uint16_t *cport);
+	const char *(*get_interface_name)(struct spdk_sock *sock);
+	int32_t (*get_numa_id)(struct spdk_sock *sock);
 	struct spdk_sock *(*connect)(const char *ip, int port, struct spdk_sock_opts *opts);
 	struct spdk_sock *(*listen)(const char *ip, int port, struct spdk_sock_opts *opts);
 	struct spdk_sock *(*accept)(struct spdk_sock *sock);
@@ -77,6 +90,7 @@ struct spdk_net_impl {
 	ssize_t (*readv)(struct spdk_sock *sock, struct iovec *iov, int iovcnt);
 	ssize_t (*writev)(struct spdk_sock *sock, struct iovec *iov, int iovcnt);
 
+	int (*recv_next)(struct spdk_sock *sock, void **buf, void **ctx);
 	void (*writev_async)(struct spdk_sock *sock, struct spdk_sock_request *req);
 	void (*readv_async)(struct spdk_sock *sock, struct spdk_sock_request *req);
 	int (*flush)(struct spdk_sock *sock);
@@ -96,6 +110,9 @@ struct spdk_net_impl {
 	int (*group_impl_remove_sock)(struct spdk_sock_group_impl *group, struct spdk_sock *sock);
 	int (*group_impl_poll)(struct spdk_sock_group_impl *group, int max_events,
 			       struct spdk_sock **socks);
+	int (*group_impl_register_interrupt)(struct spdk_sock_group_impl *group, uint32_t events,
+					     spdk_interrupt_fn fn, void *arg, const char *name);
+	void (*group_impl_unregister_interrupt)(struct spdk_sock_group_impl *group);
 	int (*group_impl_close)(struct spdk_sock_group_impl *group);
 
 	int (*get_opts)(struct spdk_sock_impl_opts *opts, size_t *len);
@@ -104,18 +121,36 @@ struct spdk_net_impl {
 	STAILQ_ENTRY(spdk_net_impl) link;
 };
 
-void spdk_net_impl_register(struct spdk_net_impl *impl, int priority);
+void spdk_net_impl_register(struct spdk_net_impl *impl);
 
-#define SPDK_NET_IMPL_REGISTER(name, impl, priority) \
+#define SPDK_NET_IMPL_REGISTER(name, impl) \
 static void __attribute__((constructor)) net_impl_register_##name(void) \
 { \
-	spdk_net_impl_register(impl, priority); \
+	spdk_net_impl_register(impl); \
 }
+
+#define SPDK_NET_IMPL_REGISTER_DEFAULT(name, impl) \
+static void __attribute__((constructor)) net_impl_register_default_##name(void) \
+{ \
+	spdk_net_impl_register(impl); \
+	spdk_sock_set_default_impl(SPDK_STRINGIFY(name)); \
+}
+
+size_t spdk_sock_group_get_buf(struct spdk_sock_group *group, void **buf, void **ctx);
 
 static inline void
 spdk_sock_request_queue(struct spdk_sock *sock, struct spdk_sock_request *req)
 {
 	assert(req->internal.curr_list == NULL);
+	if (spdk_trace_tpoint_enabled(TRACE_SOCK_REQ_QUEUE)) {
+		uint64_t len = 0;
+		int i;
+
+		for (i = 0; i < req->iovcnt; i++) {
+			len += SPDK_SOCK_REQUEST_IOV(req, i)->iov_len;
+		}
+		spdk_trace_record(TRACE_SOCK_REQ_QUEUE, 0, len, (uintptr_t)req, (uintptr_t)req->cb_arg);
+	}
 	TAILQ_INSERT_TAIL(&sock->queued_reqs, req, internal.link);
 #ifdef DEBUG
 	req->internal.curr_list = &sock->queued_reqs;
@@ -127,6 +162,7 @@ static inline void
 spdk_sock_request_pend(struct spdk_sock *sock, struct spdk_sock_request *req)
 {
 	assert(req->internal.curr_list == &sock->queued_reqs);
+	spdk_trace_record(TRACE_SOCK_REQ_PEND, 0, 0, (uintptr_t)req, (uintptr_t)req->cb_arg);
 	TAILQ_REMOVE(&sock->queued_reqs, req, internal.link);
 	assert(sock->queued_iovcnt >= req->iovcnt);
 	sock->queued_iovcnt -= req->iovcnt;
@@ -142,6 +178,7 @@ spdk_sock_request_complete(struct spdk_sock *sock, struct spdk_sock_request *req
 	bool closed;
 	int rc = 0;
 
+	spdk_trace_record(TRACE_SOCK_REQ_COMPLETE, 0, 0, (uintptr_t)req, (uintptr_t)req->cb_arg);
 	req->internal.offset = 0;
 	req->internal.is_zcopy = 0;
 
@@ -248,7 +285,7 @@ spdk_sock_prep_req(struct spdk_sock_request *req, struct iovec *iovs, int index,
 			continue;
 		}
 
-		iovs[iovcnt].iov_base = SPDK_SOCK_REQUEST_IOV(req, i)->iov_base + offset;
+		iovs[iovcnt].iov_base = (uint8_t *)SPDK_SOCK_REQUEST_IOV(req, i)->iov_base + offset;
 		iovs[iovcnt].iov_len = SPDK_SOCK_REQUEST_IOV(req, i)->iov_len - offset;
 		if (num_bytes != NULL) {
 			*num_bytes += iovs[iovcnt].iov_len;
@@ -322,7 +359,11 @@ spdk_sock_get_placement_id(int fd, enum spdk_placement_mode mode, int *placement
 #if defined(SO_INCOMING_NAPI_ID)
 		socklen_t len = sizeof(int);
 
-		getsockopt(fd, SOL_SOCKET, SO_INCOMING_NAPI_ID, placement_id, &len);
+		int rc = getsockopt(fd, SOL_SOCKET, SO_INCOMING_NAPI_ID, placement_id, &len);
+		if (rc == -1) {
+			SPDK_ERRLOG("getsockopt() failed: %s\n", strerror(errno));
+			assert(false);
+		}
 #endif
 		break;
 	}
@@ -330,7 +371,11 @@ spdk_sock_get_placement_id(int fd, enum spdk_placement_mode mode, int *placement
 #if defined(SO_INCOMING_CPU)
 		socklen_t len = sizeof(int);
 
-		getsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, placement_id, &len);
+		int rc = getsockopt(fd, SOL_SOCKET, SO_INCOMING_CPU, placement_id, &len);
+		if (rc == -1) {
+			SPDK_ERRLOG("getsockopt() failed: %s\n", strerror(errno));
+			assert(false);
+		}
 #endif
 		break;
 	}

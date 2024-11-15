@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2021 Intel Corporation. All rights reserved.
  */
 
 #include "spdk/stdinc.h"
@@ -15,6 +15,7 @@
 
 static const uint8_t *g_data;
 static bool g_trid_specified = false;
+static char *g_artifact_prefix;
 static int32_t g_time_in_sec = 10;
 static char *g_corpus_dir;
 static uint8_t *g_repro_data;
@@ -777,32 +778,43 @@ run_cmds(uint32_t queue_depth)
 static int
 TestOneInput(const uint8_t *data, size_t size)
 {
+	int ret = 0;
 	struct spdk_nvme_detach_ctx *detach_ctx = NULL;
+
+	if (size < g_fuzzer->bytes_per_cmd) {
+		return -1;
+	}
 
 	g_ctrlr = spdk_nvme_connect(&g_trid, NULL, 0);
 	if (g_ctrlr == NULL) {
 		fprintf(stderr, "spdk_nvme_connect() failed for transport address '%s'\n",
 			g_trid.traddr);
 		spdk_app_stop(-1);
+		return -1;
 	}
 
 	g_io_qpair = spdk_nvme_ctrlr_alloc_io_qpair(g_ctrlr, NULL, 0);
 	if (g_io_qpair == NULL) {
 		fprintf(stderr, "spdk_nvme_ctrlr_alloc_io_qpair failed\n");
-		spdk_app_stop(-1);
+		ret = -1;
+		goto detach_ctrlr;
 	}
 
 	g_data = data;
 
 	run_cmds(size / g_fuzzer->bytes_per_cmd);
 	spdk_nvme_ctrlr_free_io_qpair(g_io_qpair);
+detach_ctrlr:
 	spdk_nvme_detach_async(g_ctrlr, &detach_ctx);
 
 	if (detach_ctx) {
 		spdk_nvme_detach_poll(detach_ctx);
 	}
+	if (ret < 0) {
+		spdk_app_stop(ret);
+	}
 
-	return 0;
+	return ret;
 }
 
 int LLVMFuzzerRunDriver(int *argc, char ***argv, int (*UserCb)(const uint8_t *Data, size_t Size));
@@ -825,15 +837,20 @@ start_fuzzer(void *ctx)
 		"-detect_leaks=1",
 		NULL,
 		NULL,
+		NULL,
 		NULL
 	};
 	char time_str[128];
+	char prefix[PATH_MAX];
 	char len_str[128];
 	char **argv = _argv;
 	int argc = SPDK_COUNTOF(_argv);
 	uint32_t len;
+	int rc;
 
 	spdk_unaffinitize_thread();
+	snprintf(prefix, sizeof(prefix), "-artifact_prefix=%s", g_artifact_prefix);
+	argv[argc - 4] = prefix;
 	len = MAX_COMMANDS * g_fuzzer->bytes_per_cmd;
 	snprintf(len_str, sizeof(len_str), "-max_len=%d", len);
 	argv[argc - 3] = len_str;
@@ -843,12 +860,15 @@ start_fuzzer(void *ctx)
 
 	g_in_fuzzer = true;
 	atexit(exit_handler);
+
+	free(g_artifact_prefix);
+
 	if (g_repro_data) {
 		printf("Running single test based on reproduction data file.\n");
-		TestOneInput(g_repro_data, g_repro_size);
+		rc = TestOneInput(g_repro_data, g_repro_size);
 		printf("Done.\n");
 	} else {
-		LLVMFuzzerRunDriver(&argc, &argv, TestOneInput);
+		rc = LLVMFuzzerRunDriver(&argc, &argv, TestOneInput);
 		/* TODO: in the normal case, LLVMFuzzerRunDriver never returns - it calls exit()
 		 * directly and we never get here.  But this behavior isn't really documented
 		 * anywhere by LLVM, so call spdk_app_stop(0) if it does return, which will
@@ -857,7 +877,7 @@ start_fuzzer(void *ctx)
 		 */
 	}
 	g_in_fuzzer = false;
-	spdk_app_stop(0);
+	spdk_app_stop(rc);
 
 	return NULL;
 }
@@ -884,6 +904,7 @@ nvme_fuzz_usage(void)
 	fprintf(stderr, " -D                        Path of corpus directory.\n");
 	fprintf(stderr, " -F                        Transport ID for subsystem that should be fuzzed.\n");
 	fprintf(stderr, " -N                        Name of reproduction data file.\n");
+	fprintf(stderr, " -P                        Provide a prefix to use when saving artifacts.\n");
 	fprintf(stderr, " -t                        Time to run fuzz tests (in seconds). Default: 10\n");
 	fprintf(stderr, " -Z                        Fuzzer to run (0 to %lu)\n", NUM_FUZZERS - 1);
 }
@@ -893,7 +914,6 @@ nvme_fuzz_parse(int ch, char *arg)
 {
 	long long tmp;
 	int rc;
-	FILE *repro_file;
 
 	switch (ch) {
 	case 'D':
@@ -912,15 +932,17 @@ nvme_fuzz_parse(int ch, char *arg)
 		}
 		break;
 	case 'N':
-		repro_file = fopen(optarg, "r");
-		if (repro_file == NULL) {
-			fprintf(stderr, "could not open %s: %s\n", optarg, spdk_strerror(errno));
-			return -1;
-		}
-		g_repro_data = spdk_posix_file_load(repro_file, &g_repro_size);
+		g_repro_data = spdk_posix_file_load_from_name(optarg, &g_repro_size);
 		if (g_repro_data == NULL) {
 			fprintf(stderr, "could not load data for file %s\n", optarg);
 			return -1;
+		}
+		break;
+	case 'P':
+		g_artifact_prefix = strdup(optarg);
+		if (!g_artifact_prefix) {
+			fprintf(stderr, "cannot strdup: %s\n", optarg);
+			return -ENOMEM;
 		}
 		break;
 	case 't':
@@ -975,8 +997,9 @@ main(int argc, char **argv)
 	spdk_app_opts_init(&opts, sizeof(opts));
 	opts.name = "nvme_fuzz";
 	opts.shutdown_cb = fuzz_shutdown;
+	opts.rpc_addr = NULL;
 
-	if ((rc = spdk_app_parse_args(argc, argv, &opts, "D:F:N:t:Z:", NULL, nvme_fuzz_parse,
+	if ((rc = spdk_app_parse_args(argc, argv, &opts, "D:F:N:P:t:Z:", NULL, nvme_fuzz_parse,
 				      nvme_fuzz_usage) != SPDK_APP_PARSE_ARGS_SUCCESS)) {
 		return rc;
 	}

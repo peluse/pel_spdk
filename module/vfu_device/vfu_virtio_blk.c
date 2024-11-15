@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2022 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -89,10 +89,10 @@ vfu_virtio_blk_vring_poll(void *ctx)
 
 		if (vq->packed.packed_ring) {
 			/* packed vring */
-			count += vfu_virito_dev_process_packed_ring(dev, vq);
+			count += vfu_virtio_dev_process_packed_ring(dev, vq);
 		} else {
 			/* split vring */
-			count += vfu_virito_dev_process_split_ring(dev, vq);
+			count += vfu_virtio_dev_process_split_ring(dev, vq);
 		}
 	}
 
@@ -185,7 +185,7 @@ virtio_blk_process_req(struct vfu_virtio_endpoint *virtio_endpoint, struct vfu_v
 
 	iov = &req->iovs[0];
 	if (spdk_unlikely(iov->iov_len != sizeof(*hdr))) {
-		SPDK_ERRLOG("Invalid virtio_blk header length");
+		SPDK_ERRLOG("Invalid virtio_blk header length %lu\n", iov->iov_len);
 		virtio_blk_req_finish(blk_req, VIRTIO_BLK_S_UNSUPP);
 		return -EINVAL;
 	}
@@ -193,7 +193,7 @@ virtio_blk_process_req(struct vfu_virtio_endpoint *virtio_endpoint, struct vfu_v
 
 	iov = &req->iovs[req->iovcnt - 1];
 	if (spdk_unlikely(iov->iov_len != 1)) {
-		SPDK_ERRLOG("Invalid virtio_blk response length");
+		SPDK_ERRLOG("Invalid virtio_blk response length %lu\n", iov->iov_len);
 		virtio_blk_req_finish(blk_req, VIRTIO_BLK_S_UNSUPP);
 		return -EINVAL;
 	}
@@ -344,7 +344,7 @@ virtio_blk_update_config(struct virtio_blk_config *blk_cfg, struct spdk_bdev *bd
 
 	if (spdk_bdev_get_buf_align(bdev) > 1) {
 		blk_cfg->size_max = SPDK_BDEV_LARGE_BUF_MAX_SIZE;
-		blk_cfg->seg_max = spdk_min(VIRTIO_DEV_MAX_IOVS - 2 - 1, BDEV_IO_NUM_CHILD_IOV - 2 - 1);
+		blk_cfg->seg_max = spdk_min(VIRTIO_DEV_MAX_IOVS - 2 - 1, SPDK_BDEV_IO_NUM_CHILD_IOV - 2 - 1);
 	} else {
 		blk_cfg->size_max = 131072;
 		/*  -2 for REQ and RESP and -1 for region boundary splitting */

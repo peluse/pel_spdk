@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2018 Intel Corporation. All rights reserved.
  *   Copyright (c) 2020 Mellanox Technologies LTD. All rights reserved.
  *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
@@ -7,7 +7,7 @@
 #include "spdk/stdinc.h"
 #include "spdk/util.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "spdk_internal/sock.h"
 
@@ -334,7 +334,7 @@ static struct spdk_net_impl g_ut_net_impl = {
 	.group_impl_close	= spdk_ut_sock_group_impl_close,
 };
 
-SPDK_NET_IMPL_REGISTER(ut, &g_ut_net_impl, DEFAULT_SOCK_PRIORITY + 2);
+SPDK_NET_IMPL_REGISTER(ut, &g_ut_net_impl);
 
 static void
 _sock(const char *ip, int port, char *impl_name)
@@ -805,7 +805,8 @@ _sock_close(const char *ip, int port, char *impl_name)
 
 	/* Test spdk_sock_flush when sock is NULL */
 	rc = spdk_sock_flush(NULL);
-	CU_ASSERT(rc == -EBADF);
+	CU_ASSERT(rc == -1);
+	CU_ASSERT(errno == EBADF);
 
 	/* Test spdk_sock_flush when sock is not NULL */
 	rc = spdk_sock_flush(client_sock);
@@ -924,8 +925,8 @@ posix_sock_impl_get_set_opts(void)
 	rc = spdk_sock_impl_get_opts("posix", &opts, &len);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(len == sizeof(opts));
-	CU_ASSERT(opts.recv_buf_size == MIN_SO_RCVBUF_SIZE);
-	CU_ASSERT(opts.send_buf_size == MIN_SO_SNDBUF_SIZE);
+	CU_ASSERT(opts.recv_buf_size == DEFAULT_SO_RCVBUF_SIZE);
+	CU_ASSERT(opts.send_buf_size == DEFAULT_SO_SNDBUF_SIZE);
 
 	/* Try to request zero opts */
 	len = 0;
@@ -1149,7 +1150,7 @@ override_impl_opts(void)
 	opts.impl_opts = &impl_opts;
 	opts.impl_opts_size = sizeof(impl_opts);
 
-	/* Use send_buf_size to verify that impl_opts get overriden */
+	/* Use send_buf_size to verify that impl_opts get overridden */
 	send_buf_size = impl_opts.send_buf_size;
 	impl_opts.send_buf_size = send_buf_size + 1;
 
@@ -1216,13 +1217,78 @@ override_impl_opts(void)
 	spdk_sock_close(&csock);
 }
 
+static void
+ut_sock_group_get_ctx(void)
+{
+	void *test_ctx = (void *)0xff0000000;
+	void *test_ctx1 = (void *)0xfff000000;
+	void *test_ctx2 = (void *)0xffff00000;
+	struct spdk_sock_group group;
+
+	/* The return should be NULL */
+	test_ctx = spdk_sock_group_get_ctx(NULL);
+	CU_ASSERT(test_ctx == NULL);
+
+	/* The group.ctx should be changed */
+	group.ctx = test_ctx1;
+	test_ctx2 = spdk_sock_group_get_ctx(&group);
+
+	CU_ASSERT(test_ctx1 == test_ctx2);
+}
+
+static void
+posix_get_interface_name(void)
+{
+	struct spdk_sock *lsock, *csock, *asock;
+	struct spdk_sock_opts opts;
+	struct spdk_sock_impl_opts impl_opts;
+	size_t opts_size;
+	int rc;
+
+	opts_size = sizeof(impl_opts);
+	rc = spdk_sock_impl_get_opts("posix", &impl_opts, &opts_size);
+	CU_ASSERT_EQUAL(rc, 0);
+	opts.opts_size = sizeof(opts);
+	spdk_sock_get_default_opts(&opts);
+	opts.impl_opts = &impl_opts;
+	opts.impl_opts_size = sizeof(impl_opts);
+
+	lsock = spdk_sock_listen_ext("127.0.0.1", UT_PORT, "posix", &opts);
+	SPDK_CU_ASSERT_FATAL(lsock != NULL);
+
+	/* Check the same for connect() */
+	opts_size = sizeof(impl_opts);
+	rc = spdk_sock_impl_get_opts("posix", &impl_opts, &opts_size);
+	CU_ASSERT_EQUAL(rc, 0);
+	opts.opts_size = sizeof(opts);
+	spdk_sock_get_default_opts(&opts);
+	opts.impl_opts = &impl_opts;
+	opts.impl_opts_size = sizeof(impl_opts);
+
+	csock = spdk_sock_connect_ext("127.0.0.1", UT_PORT, "posix", &opts);
+	SPDK_CU_ASSERT_FATAL(csock != NULL);
+
+	asock = spdk_sock_accept(lsock);
+	SPDK_CU_ASSERT_FATAL(asock != NULL);
+
+	SPDK_CU_ASSERT_FATAL(spdk_sock_get_interface_name(lsock) != NULL);
+	SPDK_CU_ASSERT_FATAL(spdk_sock_get_interface_name(csock) != NULL);
+	SPDK_CU_ASSERT_FATAL(spdk_sock_get_interface_name(asock) != NULL);
+	CU_ASSERT(strcmp(spdk_sock_get_interface_name(lsock), "lo") == 0);
+	CU_ASSERT(strcmp(spdk_sock_get_interface_name(csock), "lo") == 0);
+	CU_ASSERT(strcmp(spdk_sock_get_interface_name(asock), "lo") == 0);
+
+	spdk_sock_close(&asock);
+	spdk_sock_close(&csock);
+	spdk_sock_close(&lsock);
+}
+
 int
 main(int argc, char **argv)
 {
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("sock", NULL, NULL);
@@ -1238,12 +1304,12 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, posix_sock_impl_get_set_opts);
 	CU_ADD_TEST(suite, ut_sock_map);
 	CU_ADD_TEST(suite, override_impl_opts);
+	CU_ADD_TEST(suite, ut_sock_group_get_ctx);
+	CU_ADD_TEST(suite, posix_get_interface_name);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
 
-	CU_basic_run_tests();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 
-	num_failures = CU_get_number_of_failures();
 	CU_cleanup_registry();
 
 	return num_failures;

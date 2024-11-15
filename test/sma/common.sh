@@ -1,3 +1,8 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation
+#  All rights reserved.
+#
+
 function sma_waitforlisten() {
 	local sma_addr=${1:-127.0.0.1}
 	local sma_port=${2:-8080}
@@ -27,7 +32,7 @@ get_cipher() {
 }
 
 format_key() {
-	base64 <(echo -n "$1")
+	base64 -w 0 <(echo -n "$1")
 }
 
 uuid2nguid() {

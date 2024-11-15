@@ -1,6 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
+ *   Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "spdk/stdinc.h"
@@ -26,11 +27,25 @@
 #include <sys/eventfd.h>
 #endif
 
+#ifdef SPDK_HAVE_EXECINFO_H
+#include <execinfo.h>
+#endif
+
 #define SPDK_MSG_BATCH_SIZE		8
 #define SPDK_MAX_DEVICE_NAME_LEN	256
 #define SPDK_THREAD_EXIT_TIMEOUT_SEC	5
 #define SPDK_MAX_POLLER_NAME_LEN	256
 #define SPDK_MAX_THREAD_NAME_LEN	256
+
+static struct spdk_thread *g_app_thread;
+
+struct spdk_interrupt {
+	int			efd;
+	struct spdk_thread	*thread;
+	spdk_interrupt_fn	fn;
+	void			*arg;
+	char			name[SPDK_MAX_POLLER_NAME_LEN + 1];
+};
 
 enum spdk_poller_state {
 	/* The poller is registered with a thread but not currently executing its fn. */
@@ -68,8 +83,7 @@ struct spdk_poller {
 	spdk_poller_fn			fn;
 	void				*arg;
 	struct spdk_thread		*thread;
-	/* Native interruptfd for period or busy poller */
-	int				interruptfd;
+	struct spdk_interrupt		*intr;
 	spdk_poller_set_interrupt_mode_cb set_intr_cb_fn;
 	void				*set_intr_cb_arg;
 
@@ -119,6 +133,7 @@ struct spdk_thread {
 	uint64_t			next_poller_id;
 	enum spdk_thread_state		state;
 	int				pending_unregister_count;
+	uint32_t			for_each_count;
 
 	RB_HEAD(io_channel_tree, spdk_io_channel)	io_channels;
 	TAILQ_ENTRY(spdk_thread)			tailq;
@@ -127,14 +142,29 @@ struct spdk_thread {
 	struct spdk_cpuset		cpumask;
 	uint64_t			exit_timeout_tsc;
 
+	int32_t				lock_count;
+
+	/* spdk_thread is bound to current CPU core. */
+	bool				is_bound;
+
 	/* Indicates whether this spdk_thread currently runs in interrupt. */
 	bool				in_interrupt;
 	bool				poller_unregistered;
 	struct spdk_fd_group		*fgrp;
 
+	uint16_t			trace_id;
+
+	uint8_t				reserved[6];
+
 	/* User context allocated at the end */
 	uint8_t				ctx[0];
 };
+
+/*
+ * Assert that spdk_thread struct is 8 byte aligned to ensure
+ * the user ctx is also 8-byte aligned.
+ */
+SPDK_STATIC_ASSERT((sizeof(struct spdk_thread)) % 8 == 0, "Incorrect size");
 
 static pthread_mutex_t g_devlist_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -147,6 +177,75 @@ static size_t g_ctx_sz = 0;
  * SPDK application is required.
  */
 static uint64_t g_thread_id = 1;
+
+enum spin_error {
+	SPIN_ERR_NONE,
+	/* Trying to use an SPDK lock while not on an SPDK thread */
+	SPIN_ERR_NOT_SPDK_THREAD,
+	/* Trying to lock a lock already held by this SPDK thread */
+	SPIN_ERR_DEADLOCK,
+	/* Trying to unlock a lock not held by this SPDK thread */
+	SPIN_ERR_WRONG_THREAD,
+	/* pthread_spin_*() returned an error */
+	SPIN_ERR_PTHREAD,
+	/* Trying to destroy a lock that is held */
+	SPIN_ERR_LOCK_HELD,
+	/* lock_count is invalid */
+	SPIN_ERR_LOCK_COUNT,
+	/*
+	 * An spdk_thread may migrate to another pthread. A spinlock held across migration leads to
+	 * undefined behavior. A spinlock held when an SPDK thread goes off CPU would lead to
+	 * deadlock when another SPDK thread on the same pthread tries to take that lock.
+	 */
+	SPIN_ERR_HOLD_DURING_SWITCH,
+	/* Trying to use a lock that was destroyed (but not re-initialized) */
+	SPIN_ERR_DESTROYED,
+	/* Trying to use a lock that is not initialized */
+	SPIN_ERR_NOT_INITIALIZED,
+
+	/* Must be last, not an actual error code */
+	SPIN_ERR_LAST
+};
+
+static const char *spin_error_strings[] = {
+	[SPIN_ERR_NONE]			= "No error",
+	[SPIN_ERR_NOT_SPDK_THREAD]	= "Not an SPDK thread",
+	[SPIN_ERR_DEADLOCK]		= "Deadlock detected",
+	[SPIN_ERR_WRONG_THREAD]		= "Unlock on wrong SPDK thread",
+	[SPIN_ERR_PTHREAD]		= "Error from pthread_spinlock",
+	[SPIN_ERR_LOCK_HELD]		= "Destroying a held spinlock",
+	[SPIN_ERR_LOCK_COUNT]		= "Lock count is invalid",
+	[SPIN_ERR_HOLD_DURING_SWITCH]	= "Lock(s) held while SPDK thread going off CPU",
+	[SPIN_ERR_DESTROYED]		= "Lock has been destroyed",
+	[SPIN_ERR_NOT_INITIALIZED]	= "Lock has not been initialized",
+};
+
+#define SPIN_ERROR_STRING(err) (err < 0 || err >= SPDK_COUNTOF(spin_error_strings)) \
+				? "Unknown error" : spin_error_strings[err]
+
+static void
+__posix_abort(enum spin_error err)
+{
+	abort();
+}
+
+typedef void (*spin_abort)(enum spin_error err);
+spin_abort g_spin_abort_fn = __posix_abort;
+
+#define SPIN_ASSERT_IMPL(cond, err, extra_log, ret) \
+	do { \
+		if (spdk_unlikely(!(cond))) { \
+			SPDK_ERRLOG("unrecoverable spinlock error %d: %s (%s)\n", err, \
+				    SPIN_ERROR_STRING(err), #cond); \
+			extra_log; \
+			g_spin_abort_fn(err); \
+			ret; \
+		} \
+	} while (0)
+#define SPIN_ASSERT_LOG_STACKS(cond, err, lock) \
+	SPIN_ASSERT_IMPL(cond, err, sspin_stacks_print(sspin), return)
+#define SPIN_ASSERT_RETURN(cond, err, ret)	SPIN_ASSERT_IMPL(cond, err, , return ret)
+#define SPIN_ASSERT(cond, err)			SPIN_ASSERT_IMPL(cond, err, ,)
 
 struct io_device {
 	void				*io_device;
@@ -190,7 +289,6 @@ struct spdk_msg {
 	SLIST_ENTRY(spdk_msg)	link;
 };
 
-#define SPDK_MSG_MEMPOOL_CACHE_SIZE	1024
 static struct spdk_mempool *g_spdk_msg_mempool = NULL;
 
 static TAILQ_HEAD(, spdk_thread) g_threads = TAILQ_HEAD_INITIALIZER(g_threads);
@@ -198,17 +296,26 @@ static uint32_t g_thread_count = 0;
 
 static __thread struct spdk_thread *tls_thread = NULL;
 
-SPDK_TRACE_REGISTER_FN(thread_trace, "thread", TRACE_GROUP_THREAD)
+static void
+thread_trace(void)
 {
-	spdk_trace_register_description("THREAD_IOCH_GET",
-					TRACE_THREAD_IOCH_GET,
-					OWNER_NONE, OBJECT_NONE, 0,
-					SPDK_TRACE_ARG_TYPE_INT, "refcnt");
-	spdk_trace_register_description("THREAD_IOCH_PUT",
-					TRACE_THREAD_IOCH_PUT,
-					OWNER_NONE, OBJECT_NONE, 0,
-					SPDK_TRACE_ARG_TYPE_INT, "refcnt");
+	struct spdk_trace_tpoint_opts opts[] = {
+		{
+			"THREAD_IOCH_GET", TRACE_THREAD_IOCH_GET,
+			OWNER_TYPE_NONE, OBJECT_NONE, 0,
+			{{ "refcnt", SPDK_TRACE_ARG_TYPE_INT, 4 }}
+		},
+		{
+			"THREAD_IOCH_PUT", TRACE_THREAD_IOCH_PUT,
+			OWNER_TYPE_NONE, OBJECT_NONE, 0,
+			{{ "refcnt", SPDK_TRACE_ARG_TYPE_INT, 4 }}
+		}
+	};
+
+	spdk_trace_register_owner_type(OWNER_TYPE_THREAD, 't');
+	spdk_trace_register_description_ext(opts, SPDK_COUNTOF(opts));
 }
+SPDK_TRACE_REGISTER_FN(thread_trace, "thread", TRACE_GROUP_THREAD)
 
 /*
  * If this compare function returns zero when two next_run_ticks are equal,
@@ -250,7 +357,7 @@ _thread_lib_init(size_t ctx_sz, size_t msg_mempool_sz)
 	g_spdk_msg_mempool = spdk_mempool_create(mempool_name, msg_mempool_sz,
 			     sizeof(struct spdk_msg),
 			     0, /* No cache. We do our own. */
-			     SPDK_ENV_SOCKET_ID_ANY);
+			     SPDK_ENV_NUMA_ID_ANY);
 
 	SPDK_DEBUGLOG(thread, "spdk_msg_mempool was created with size: %zu\n",
 		      msg_mempool_sz);
@@ -261,65 +368,6 @@ _thread_lib_init(size_t ctx_sz, size_t msg_mempool_sz)
 	}
 
 	return 0;
-}
-
-int
-spdk_thread_lib_init(spdk_new_thread_fn new_thread_fn, size_t ctx_sz)
-{
-	assert(g_new_thread_fn == NULL);
-	assert(g_thread_op_fn == NULL);
-
-	if (new_thread_fn == NULL) {
-		SPDK_INFOLOG(thread, "new_thread_fn was not specified at spdk_thread_lib_init\n");
-	} else {
-		g_new_thread_fn = new_thread_fn;
-	}
-
-	return _thread_lib_init(ctx_sz, SPDK_DEFAULT_MSG_MEMPOOL_SIZE);
-}
-
-int
-spdk_thread_lib_init_ext(spdk_thread_op_fn thread_op_fn,
-			 spdk_thread_op_supported_fn thread_op_supported_fn,
-			 size_t ctx_sz, size_t msg_mempool_sz)
-{
-	assert(g_new_thread_fn == NULL);
-	assert(g_thread_op_fn == NULL);
-	assert(g_thread_op_supported_fn == NULL);
-
-	if ((thread_op_fn != NULL) != (thread_op_supported_fn != NULL)) {
-		SPDK_ERRLOG("Both must be defined or undefined together.\n");
-		return -EINVAL;
-	}
-
-	if (thread_op_fn == NULL && thread_op_supported_fn == NULL) {
-		SPDK_INFOLOG(thread, "thread_op_fn and thread_op_supported_fn were not specified\n");
-	} else {
-		g_thread_op_fn = thread_op_fn;
-		g_thread_op_supported_fn = thread_op_supported_fn;
-	}
-
-	return _thread_lib_init(ctx_sz, msg_mempool_sz);
-}
-
-void
-spdk_thread_lib_fini(void)
-{
-	struct io_device *dev;
-
-	RB_FOREACH(dev, io_device_tree, &g_io_devices) {
-		SPDK_ERRLOG("io_device %s not unregistered\n", dev->name);
-	}
-
-	if (g_spdk_msg_mempool) {
-		spdk_mempool_free(g_spdk_msg_mempool);
-		g_spdk_msg_mempool = NULL;
-	}
-
-	g_new_thread_fn = NULL;
-	g_thread_op_fn = NULL;
-	g_thread_op_supported_fn = NULL;
-	g_ctx_sz = 0;
 }
 
 static void thread_interrupt_destroy(struct spdk_thread *thread);
@@ -388,18 +436,85 @@ _free_thread(struct spdk_thread *thread)
 	free(thread);
 }
 
+int
+spdk_thread_lib_init(spdk_new_thread_fn new_thread_fn, size_t ctx_sz)
+{
+	assert(g_new_thread_fn == NULL);
+	assert(g_thread_op_fn == NULL);
+
+	if (new_thread_fn == NULL) {
+		SPDK_INFOLOG(thread, "new_thread_fn was not specified at spdk_thread_lib_init\n");
+	} else {
+		g_new_thread_fn = new_thread_fn;
+	}
+
+	return _thread_lib_init(ctx_sz, SPDK_DEFAULT_MSG_MEMPOOL_SIZE);
+}
+
+int
+spdk_thread_lib_init_ext(spdk_thread_op_fn thread_op_fn,
+			 spdk_thread_op_supported_fn thread_op_supported_fn,
+			 size_t ctx_sz, size_t msg_mempool_sz)
+{
+	assert(g_new_thread_fn == NULL);
+	assert(g_thread_op_fn == NULL);
+	assert(g_thread_op_supported_fn == NULL);
+
+	if ((thread_op_fn != NULL) != (thread_op_supported_fn != NULL)) {
+		SPDK_ERRLOG("Both must be defined or undefined together.\n");
+		return -EINVAL;
+	}
+
+	if (thread_op_fn == NULL && thread_op_supported_fn == NULL) {
+		SPDK_INFOLOG(thread, "thread_op_fn and thread_op_supported_fn were not specified\n");
+	} else {
+		g_thread_op_fn = thread_op_fn;
+		g_thread_op_supported_fn = thread_op_supported_fn;
+	}
+
+	return _thread_lib_init(ctx_sz, msg_mempool_sz);
+}
+
+void
+spdk_thread_lib_fini(void)
+{
+	struct io_device *dev;
+
+	RB_FOREACH(dev, io_device_tree, &g_io_devices) {
+		SPDK_ERRLOG("io_device %s not unregistered\n", dev->name);
+	}
+
+	g_new_thread_fn = NULL;
+	g_thread_op_fn = NULL;
+	g_thread_op_supported_fn = NULL;
+	g_ctx_sz = 0;
+	if (g_app_thread != NULL) {
+		_free_thread(g_app_thread);
+		g_app_thread = NULL;
+	}
+
+	if (g_spdk_msg_mempool) {
+		spdk_mempool_free(g_spdk_msg_mempool);
+		g_spdk_msg_mempool = NULL;
+	}
+}
+
 struct spdk_thread *
 spdk_thread_create(const char *name, const struct spdk_cpuset *cpumask)
 {
-	struct spdk_thread *thread;
+	struct spdk_thread *thread, *null_thread;
+	size_t size = SPDK_ALIGN_CEIL(sizeof(*thread) + g_ctx_sz, SPDK_CACHE_LINE_SIZE);
 	struct spdk_msg *msgs[SPDK_MSG_MEMPOOL_CACHE_SIZE];
 	int rc = 0, i;
 
-	thread = calloc(1, sizeof(*thread) + g_ctx_sz);
-	if (!thread) {
+	/* Since this spdk_thread object will be used by another core, ensure that it won't share a
+	 * cache line with any other object allocated on this core */
+	rc = posix_memalign((void **)&thread, SPDK_CACHE_LINE_SIZE, size);
+	if (rc != 0) {
 		SPDK_ERRLOG("Unable to allocate memory for thread\n");
 		return NULL;
 	}
+	memset(thread, 0, size);
 
 	if (cpumask) {
 		spdk_cpuset_copy(&thread->cpumask, cpumask);
@@ -421,7 +536,7 @@ spdk_thread_create(const char *name, const struct spdk_cpuset *cpumask)
 	 */
 	thread->next_poller_id = 1;
 
-	thread->messages = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 65536, SPDK_ENV_SOCKET_ID_ANY);
+	thread->messages = spdk_ring_create(SPDK_RING_TYPE_MP_SC, 65536, SPDK_ENV_NUMA_ID_ANY);
 	if (!thread->messages) {
 		SPDK_ERRLOG("Unable to allocate memory for message ring\n");
 		free(thread);
@@ -444,6 +559,8 @@ spdk_thread_create(const char *name, const struct spdk_cpuset *cpumask)
 	} else {
 		snprintf(thread->name, sizeof(thread->name), "%p", thread);
 	}
+
+	thread->trace_id = spdk_trace_register_owner(OWNER_TYPE_THREAD, thread->name);
 
 	pthread_mutex_lock(&g_devlist_mutex);
 	if (g_thread_id == 0) {
@@ -482,7 +599,43 @@ spdk_thread_create(const char *name, const struct spdk_cpuset *cpumask)
 
 	thread->state = SPDK_THREAD_STATE_RUNNING;
 
+	/* If this is the first thread, save it as the app thread.  Use an atomic
+	 * compare + exchange to guard against crazy users who might try to
+	 * call spdk_thread_create() simultaneously on multiple threads.
+	 */
+	null_thread = NULL;
+	__atomic_compare_exchange_n(&g_app_thread, &null_thread, thread, false,
+				    __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+
 	return thread;
+}
+
+struct spdk_thread *
+spdk_thread_get_app_thread(void)
+{
+	return g_app_thread;
+}
+
+bool
+spdk_thread_is_app_thread(struct spdk_thread *thread)
+{
+	if (thread == NULL) {
+		thread = _get_thread();
+	}
+
+	return g_app_thread == thread;
+}
+
+void
+spdk_thread_bind(struct spdk_thread *thread, bool bind)
+{
+	thread->is_bound = bind;
+}
+
+bool
+spdk_thread_is_bound(struct spdk_thread *thread)
+{
+	return thread->is_bound;
 }
 
 void
@@ -501,6 +654,17 @@ thread_exit(struct spdk_thread *thread, uint64_t now)
 		SPDK_ERRLOG("thread %s got timeout, and move it to the exited state forcefully\n",
 			    thread->name);
 		goto exited;
+	}
+
+	if (spdk_ring_count(thread->messages) > 0) {
+		SPDK_INFOLOG(thread, "thread %s still has messages\n", thread->name);
+		return;
+	}
+
+	if (thread->for_each_count > 0) {
+		SPDK_INFOLOG(thread, "thread %s is still executing %u for_each_channels/threads\n",
+			     thread->name, thread->for_each_count);
+		return;
 	}
 
 	TAILQ_FOREACH(poller, &thread->active_pollers, tailq) {
@@ -549,6 +713,8 @@ exited:
 	}
 }
 
+static void _thread_exit(void *ctx);
+
 int
 spdk_thread_exit(struct spdk_thread *thread)
 {
@@ -566,7 +732,18 @@ spdk_thread_exit(struct spdk_thread *thread)
 	thread->exit_timeout_tsc = spdk_get_ticks() + (spdk_get_ticks_hz() *
 				   SPDK_THREAD_EXIT_TIMEOUT_SEC);
 	thread->state = SPDK_THREAD_STATE_EXITING;
+
+	if (spdk_interrupt_mode_is_enabled()) {
+		spdk_thread_send_msg(thread, _thread_exit, thread);
+	}
+
 	return 0;
+}
+
+bool
+spdk_thread_is_running(struct spdk_thread *thread)
+{
+	return thread->state == SPDK_THREAD_STATE_RUNNING;
 }
 
 bool
@@ -578,6 +755,7 @@ spdk_thread_is_exited(struct spdk_thread *thread)
 void
 spdk_thread_destroy(struct spdk_thread *thread)
 {
+	assert(thread != NULL);
 	SPDK_DEBUGLOG(thread, "Destroy thread %s\n", thread->name);
 
 	assert(thread->state == SPDK_THREAD_STATE_EXITED);
@@ -586,7 +764,10 @@ spdk_thread_destroy(struct spdk_thread *thread)
 		tls_thread = NULL;
 	}
 
-	_free_thread(thread);
+	/* To be safe, do not free the app thread until spdk_thread_lib_fini(). */
+	if (thread != g_app_thread) {
+		_free_thread(thread);
+	}
 }
 
 void *
@@ -691,6 +872,8 @@ msg_queue_run_batch(struct spdk_thread *thread, uint32_t max_msgs)
 
 		msg->fn(msg->arg);
 
+		SPIN_ASSERT(thread->lock_count == 0, SPIN_ERR_HOLD_DURING_SWITCH);
+
 		if (thread->msg_cache_count < SPDK_MSG_MEMPOOL_CACHE_SIZE) {
 			/* Insert the messages at the head. We want to re-use the hot
 			 * ones. */
@@ -794,6 +977,8 @@ thread_execute_poller(struct spdk_thread *thread, struct spdk_poller *poller)
 	poller->state = SPDK_POLLER_STATE_RUNNING;
 	rc = poller->fn(poller->arg);
 
+	SPIN_ASSERT(thread->lock_count == 0, SPIN_ERR_HOLD_DURING_SWITCH);
+
 	poller->run_count++;
 	if (rc > 0) {
 		poller->busy_count++;
@@ -852,6 +1037,8 @@ thread_execute_timed_poller(struct spdk_thread *thread, struct spdk_poller *poll
 
 	poller->state = SPDK_POLLER_STATE_RUNNING;
 	rc = poller->fn(poller->arg);
+
+	SPIN_ASSERT(thread->lock_count == 0, SPIN_ERR_HOLD_DURING_SWITCH);
 
 	poller->run_count++;
 	if (rc > 0) {
@@ -950,12 +1137,49 @@ thread_poll(struct spdk_thread *thread, uint32_t max_msgs, uint64_t now)
 	return rc;
 }
 
+static void
+_thread_remove_pollers(void *ctx)
+{
+	struct spdk_thread *thread = ctx;
+	struct spdk_poller *poller, *tmp;
+
+	TAILQ_FOREACH_REVERSE_SAFE(poller, &thread->active_pollers,
+				   active_pollers_head, tailq, tmp) {
+		if (poller->state == SPDK_POLLER_STATE_UNREGISTERED) {
+			TAILQ_REMOVE(&thread->active_pollers, poller, tailq);
+			free(poller);
+		}
+	}
+
+	RB_FOREACH_SAFE(poller, timed_pollers_tree, &thread->timed_pollers, tmp) {
+		if (poller->state == SPDK_POLLER_STATE_UNREGISTERED) {
+			poller_remove_timer(thread, poller);
+			free(poller);
+		}
+	}
+
+	thread->poller_unregistered = false;
+}
+
+static void
+_thread_exit(void *ctx)
+{
+	struct spdk_thread *thread = ctx;
+
+	assert(thread->state == SPDK_THREAD_STATE_EXITING);
+
+	thread_exit(thread, spdk_get_ticks());
+
+	if (thread->state != SPDK_THREAD_STATE_EXITED) {
+		spdk_thread_send_msg(thread, _thread_exit, thread);
+	}
+}
+
 int
 spdk_thread_poll(struct spdk_thread *thread, uint32_t max_msgs, uint64_t now)
 {
 	struct spdk_thread *orig_thread;
 	int rc;
-	uint64_t notify = 1;
 
 	orig_thread = _get_thread();
 	tls_thread = thread;
@@ -973,45 +1197,13 @@ spdk_thread_poll(struct spdk_thread *thread, uint32_t max_msgs, uint64_t now)
 			 */
 			rc = thread_poll(thread, max_msgs, now);
 		}
+
+		if (spdk_unlikely(thread->state == SPDK_THREAD_STATE_EXITING)) {
+			thread_exit(thread, now);
+		}
 	} else {
 		/* Non-block wait on thread's fd_group */
 		rc = spdk_fd_group_wait(thread->fgrp, 0);
-		if (spdk_unlikely(!thread->in_interrupt)) {
-			/* The thread transitioned to poll mode in a msg during the above processing.
-			 * Clear msg_fd since thread messages will be polled directly in poll mode.
-			 */
-			rc = read(thread->msg_fd, &notify, sizeof(notify));
-			if (rc < 0 && errno != EAGAIN) {
-				SPDK_ERRLOG("failed to acknowledge msg queue: %s.\n", spdk_strerror(errno));
-			}
-		}
-
-		/* Reap unregistered pollers out of poller execution in intr mode */
-		if (spdk_unlikely(thread->poller_unregistered)) {
-			struct spdk_poller *poller, *tmp;
-
-			TAILQ_FOREACH_REVERSE_SAFE(poller, &thread->active_pollers,
-						   active_pollers_head, tailq, tmp) {
-				if (poller->state == SPDK_POLLER_STATE_UNREGISTERED) {
-					TAILQ_REMOVE(&thread->active_pollers, poller, tailq);
-					free(poller);
-				}
-			}
-
-			RB_FOREACH_SAFE(poller, timed_pollers_tree, &thread->timed_pollers, tmp) {
-				if (poller->state == SPDK_POLLER_STATE_UNREGISTERED) {
-					poller_remove_timer(thread, poller);
-					free(poller);
-				}
-			}
-
-			thread->poller_unregistered = false;
-		}
-	}
-
-
-	if (spdk_unlikely(thread->state == SPDK_THREAD_STATE_EXITING)) {
-		thread_exit(thread, now);
 	}
 
 	thread_update_stats(thread, spdk_get_ticks(), now, rc);
@@ -1247,7 +1439,7 @@ interrupt_timerfd_process(void *arg)
 	int rc;
 
 	/* clear the level of interval timer */
-	rc = read(poller->interruptfd, &exp, sizeof(exp));
+	rc = read(poller->intr->efd, &exp, sizeof(exp));
 	if (rc < 0) {
 		if (rc == -EAGAIN) {
 			return 0;
@@ -1264,9 +1456,7 @@ interrupt_timerfd_process(void *arg)
 static int
 period_poller_interrupt_init(struct spdk_poller *poller)
 {
-	struct spdk_fd_group *fgrp = poller->thread->fgrp;
 	int timerfd;
-	int rc;
 
 	SPDK_DEBUGLOG(thread, "timerfd init for periodic poller %s\n", poller->name);
 	timerfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
@@ -1274,27 +1464,30 @@ period_poller_interrupt_init(struct spdk_poller *poller)
 		return -errno;
 	}
 
-	rc = SPDK_FD_GROUP_ADD(fgrp, timerfd, interrupt_timerfd_process, poller);
-	if (rc < 0) {
+	poller->intr = spdk_interrupt_register(timerfd, interrupt_timerfd_process, poller, poller->name);
+	if (poller->intr == NULL) {
 		close(timerfd);
-		return rc;
+		return -1;
 	}
 
-	poller->interruptfd = timerfd;
 	return 0;
 }
 
 static void
 period_poller_set_interrupt_mode(struct spdk_poller *poller, void *cb_arg, bool interrupt_mode)
 {
-	int timerfd = poller->interruptfd;
+	int timerfd;
 	uint64_t now_tick = spdk_get_ticks();
 	uint64_t ticks = spdk_get_ticks_hz();
 	int ret;
 	struct itimerspec new_tv = {};
 	struct itimerspec old_tv = {};
 
+	assert(poller->intr != NULL);
 	assert(poller->period_ticks != 0);
+
+	timerfd = poller->intr->efd;
+
 	assert(timerfd >= 0);
 
 	SPDK_DEBUGLOG(thread, "timerfd set poller %s into %s mode\n", poller->name,
@@ -1342,18 +1535,19 @@ period_poller_set_interrupt_mode(struct spdk_poller *poller, void *cb_arg, bool 
 static void
 poller_interrupt_fini(struct spdk_poller *poller)
 {
+	int fd;
+
 	SPDK_DEBUGLOG(thread, "interrupt fini for poller %s\n", poller->name);
-	assert(poller->interruptfd >= 0);
-	spdk_fd_group_remove(poller->thread->fgrp, poller->interruptfd);
-	close(poller->interruptfd);
-	poller->interruptfd = -1;
+	assert(poller->intr != NULL);
+	fd = poller->intr->efd;
+	spdk_interrupt_unregister(&poller->intr);
+	close(fd);
 }
 
 static int
 busy_poller_interrupt_init(struct spdk_poller *poller)
 {
 	int busy_efd;
-	int rc;
 
 	SPDK_DEBUGLOG(thread, "busy_efd init for busy poller %s\n", poller->name);
 	busy_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -1362,21 +1556,19 @@ busy_poller_interrupt_init(struct spdk_poller *poller)
 		return -errno;
 	}
 
-	rc = spdk_fd_group_add(poller->thread->fgrp, busy_efd,
-			       poller->fn, poller->arg, poller->name);
-	if (rc < 0) {
+	poller->intr = spdk_interrupt_register(busy_efd, poller->fn, poller->arg, poller->name);
+	if (poller->intr == NULL) {
 		close(busy_efd);
-		return rc;
+		return -1;
 	}
 
-	poller->interruptfd = busy_efd;
 	return 0;
 }
 
 static void
 busy_poller_set_interrupt_mode(struct spdk_poller *poller, void *cb_arg, bool interrupt_mode)
 {
-	int busy_efd = poller->interruptfd;
+	int busy_efd = poller->intr->efd;
 	uint64_t notify = 1;
 	int rc __attribute__((unused));
 
@@ -1430,20 +1622,14 @@ spdk_poller_register_interrupt(struct spdk_poller *poller,
 			       void *cb_arg)
 {
 	assert(poller != NULL);
-	assert(cb_fn != NULL);
 	assert(spdk_get_thread() == poller->thread);
 
 	if (!spdk_interrupt_mode_is_enabled()) {
 		return;
 	}
 
-	/* when a poller is created we don't know if the user is ever going to
-	 * enable interrupts on it by calling this function, so the poller
-	 * registration function has to immediately create a interruptfd.
-	 * When this function does get called by user, we have to then destroy
-	 * that interruptfd.
-	 */
-	if (poller->set_intr_cb_fn && poller->interruptfd >= 0) {
+	/* If this poller already had an interrupt, clean the old one up. */
+	if (poller->intr != NULL) {
 		poller_interrupt_fini(poller);
 	}
 
@@ -1451,7 +1637,7 @@ spdk_poller_register_interrupt(struct spdk_poller *poller,
 	poller->set_intr_cb_arg = cb_arg;
 
 	/* Set poller into interrupt mode if thread is in interrupt. */
-	if (poller->thread->in_interrupt) {
+	if (poller->thread->in_interrupt && poller->set_intr_cb_fn) {
 		poller->set_intr_cb_fn(poller, poller->set_intr_cb_arg, true);
 	}
 }
@@ -1508,7 +1694,7 @@ poller_register(spdk_poller_fn fn,
 	poller->fn = fn;
 	poller->arg = arg;
 	poller->thread = thread;
-	poller->interruptfd = -1;
+	poller->intr = NULL;
 	if (thread->next_poller_id == 0) {
 		SPDK_WARNLOG("Poller ID rolled over. Poller ID is duplicated.\n");
 		thread->next_poller_id = 1;
@@ -1528,7 +1714,9 @@ poller_register(spdk_poller_fn fn,
 				return NULL;
 			}
 
-			spdk_poller_register_interrupt(poller, period_poller_set_interrupt_mode, NULL);
+			poller->set_intr_cb_fn = period_poller_set_interrupt_mode;
+			poller->set_intr_cb_arg = NULL;
+
 		} else {
 			/* If the poller doesn't have a period, create interruptfd that's always
 			 * busy automatically when running in interrupt mode.
@@ -1540,7 +1728,13 @@ poller_register(spdk_poller_fn fn,
 				return NULL;
 			}
 
-			spdk_poller_register_interrupt(poller, busy_poller_set_interrupt_mode, NULL);
+			poller->set_intr_cb_fn = busy_poller_set_interrupt_mode;
+			poller->set_intr_cb_arg = NULL;
+		}
+
+		/* Set poller into interrupt mode if thread is in interrupt. */
+		if (poller->thread->in_interrupt) {
+			poller->set_intr_cb_fn(poller, poller->set_intr_cb_arg, true);
 		}
 	}
 
@@ -1606,14 +1800,16 @@ spdk_poller_unregister(struct spdk_poller **ppoller)
 
 	if (spdk_interrupt_mode_is_enabled()) {
 		/* Release the interrupt resource for period or busy poller */
-		if (poller->interruptfd >= 0) {
+		if (poller->intr != NULL) {
 			poller_interrupt_fini(poller);
 		}
 
-		/* Mark there is poller unregistered. Then unregistered pollers will
-		 * get reaped by spdk_thread_poll also in intr mode.
-		 */
-		thread->poller_unregistered = true;
+		/* If there is not already a pending poller removal, generate
+		 * a message to go process removals. */
+		if (!thread->poller_unregistered) {
+			thread->poller_unregistered = true;
+			spdk_thread_send_msg(thread, _thread_remove_pollers, thread);
+		}
 	}
 
 	/* If the poller was paused, put it on the active_pollers list so that
@@ -1798,6 +1994,12 @@ spdk_thread_get_next_io_channel(struct spdk_io_channel *prev)
 	return RB_NEXT(io_channel_tree, &thread->io_channels, prev);
 }
 
+uint16_t
+spdk_thread_get_trace_id(struct spdk_thread *thread)
+{
+	return thread->trace_id;
+}
+
 struct call_thread {
 	struct spdk_thread *cur_thread;
 	spdk_msg_fn fn;
@@ -1806,6 +2008,18 @@ struct call_thread {
 	struct spdk_thread *orig_thread;
 	spdk_msg_fn cpl;
 };
+
+static void
+_back_to_orig_thread(void *ctx)
+{
+	struct call_thread *ct = ctx;
+
+	assert(ct->orig_thread->for_each_count > 0);
+	ct->orig_thread->for_each_count--;
+
+	ct->cpl(ct->ctx);
+	free(ctx);
+}
 
 static void
 _on_thread(void *ctx)
@@ -1827,8 +2041,7 @@ _on_thread(void *ctx)
 	if (!ct->cur_thread) {
 		SPDK_DEBUGLOG(thread, "Completed thread iteration\n");
 
-		rc = spdk_thread_send_msg(ct->orig_thread, ct->cpl, ct->ctx);
-		free(ctx);
+		rc = spdk_thread_send_msg(ct->orig_thread, _back_to_orig_thread, ctx);
 	} else {
 		SPDK_DEBUGLOG(thread, "Continuing thread iteration to %s\n",
 			      ct->cur_thread->name);
@@ -1865,6 +2078,8 @@ spdk_for_each_thread(spdk_msg_fn fn, void *ctx, spdk_msg_fn cpl)
 	}
 	ct->orig_thread = thread;
 
+	ct->orig_thread->for_each_count++;
+
 	pthread_mutex_lock(&g_devlist_mutex);
 	ct->cur_thread = TAILQ_FIRST(&g_threads);
 	pthread_mutex_unlock(&g_devlist_mutex);
@@ -1883,13 +2098,9 @@ poller_set_interrupt_mode(struct spdk_poller *poller, bool interrupt_mode)
 		return;
 	}
 
-	if (!poller->set_intr_cb_fn) {
-		SPDK_ERRLOG("Poller(%s) doesn't support set interrupt mode.\n", poller->name);
-		assert(false);
-		return;
+	if (poller->set_intr_cb_fn) {
+		poller->set_intr_cb_fn(poller, poller->set_intr_cb_arg, interrupt_mode);
 	}
-
-	poller->set_intr_cb_fn(poller, poller->set_intr_cb_arg, interrupt_mode);
 }
 
 void
@@ -2175,6 +2386,8 @@ spdk_get_io_channel(void *io_device)
 		RB_REMOVE(io_channel_tree, &ch->thread->io_channels, ch);
 		dev->refcnt--;
 		free(ch);
+		SPDK_ERRLOG("could not create io_channel for io_device %s (%p): %s (rc=%d)\n",
+			    dev->name, io_device, spdk_strerror(-rc), rc);
 		pthread_mutex_unlock(&g_devlist_mutex);
 		return NULL;
 	}
@@ -2341,6 +2554,9 @@ _call_completion(void *ctx)
 {
 	struct spdk_io_channel_iter *i = ctx;
 
+	assert(i->orig_thread->for_each_count > 0);
+	i->orig_thread->for_each_count--;
+
 	if (i->cpl != NULL) {
 		i->cpl(i, i->status);
 	}
@@ -2390,6 +2606,8 @@ spdk_for_each_channel(void *io_device, spdk_channel_msg fn, void *ctx,
 	i->ctx = ctx;
 	i->cpl = cpl;
 	i->orig_thread = _get_thread();
+
+	i->orig_thread->for_each_count++;
 
 	pthread_mutex_lock(&g_devlist_mutex);
 	i->dev = io_device_get(io_device);
@@ -2487,12 +2705,6 @@ end:
 	pthread_mutex_unlock(&g_devlist_mutex);
 }
 
-struct spdk_interrupt {
-	int			efd;
-	struct spdk_thread	*thread;
-	char			name[SPDK_MAX_POLLER_NAME_LEN + 1];
-};
-
 static void
 thread_interrupt_destroy(struct spdk_thread *thread)
 {
@@ -2517,12 +2729,16 @@ static int
 thread_interrupt_msg_process(void *arg)
 {
 	struct spdk_thread *thread = arg;
+	struct spdk_thread *orig_thread;
 	uint32_t msg_count;
 	spdk_msg_fn critical_msg;
 	int rc = 0;
 	uint64_t notify = 1;
 
 	assert(spdk_interrupt_mode_is_enabled());
+
+	orig_thread = spdk_get_thread();
+	spdk_set_thread(thread);
 
 	/* There may be race between msg_acknowledge and another producer's msg_notify,
 	 * so msg_acknowledge should be applied ahead. And then check for self's msg_notify.
@@ -2545,6 +2761,18 @@ thread_interrupt_msg_process(void *arg)
 		rc = 1;
 	}
 
+	SPIN_ASSERT(thread->lock_count == 0, SPIN_ERR_HOLD_DURING_SWITCH);
+	if (spdk_unlikely(!thread->in_interrupt)) {
+		/* The thread transitioned to poll mode in a msg during the above processing.
+		 * Clear msg_fd since thread messages will be polled directly in poll mode.
+		 */
+		rc = read(thread->msg_fd, &notify, sizeof(notify));
+		if (rc < 0 && errno != EAGAIN) {
+			SPDK_ERRLOG("failed to acknowledge msg queue: %s.\n", spdk_strerror(errno));
+		}
+	}
+
+	spdk_set_thread(orig_thread);
 	return rc;
 }
 
@@ -2580,9 +2808,53 @@ thread_interrupt_create(struct spdk_thread *thread)
 }
 #endif
 
+static int
+_interrupt_wrapper(void *ctx)
+{
+	struct spdk_interrupt *intr = ctx;
+	struct spdk_thread *orig_thread, *thread;
+	int rc;
+
+	orig_thread = spdk_get_thread();
+	thread = intr->thread;
+
+	spdk_set_thread(thread);
+
+	SPDK_DTRACE_PROBE4(interrupt_fd_process, intr->name, intr->efd,
+			   intr->fn, intr->arg);
+
+	rc = intr->fn(intr->arg);
+
+	SPIN_ASSERT(thread->lock_count == 0, SPIN_ERR_HOLD_DURING_SWITCH);
+
+	spdk_set_thread(orig_thread);
+
+	return rc;
+}
+
 struct spdk_interrupt *
 spdk_interrupt_register(int efd, spdk_interrupt_fn fn,
 			void *arg, const char *name)
+{
+	return spdk_interrupt_register_for_events(efd, SPDK_INTERRUPT_EVENT_IN, fn, arg, name);
+}
+
+struct spdk_interrupt *
+spdk_interrupt_register_for_events(int efd, uint32_t events, spdk_interrupt_fn fn, void *arg,
+				   const char *name)
+{
+	struct spdk_event_handler_opts opts = {};
+
+	spdk_fd_group_get_default_event_handler_opts(&opts, sizeof(opts));
+	opts.events = events;
+	opts.fd_type = SPDK_FD_TYPE_DEFAULT;
+
+	return spdk_interrupt_register_ext(efd, fn, arg, name, &opts);
+}
+
+struct spdk_interrupt *
+spdk_interrupt_register_ext(int efd, spdk_interrupt_fn fn, void *arg, const char *name,
+			    struct spdk_event_handler_opts *opts)
 {
 	struct spdk_thread *thread;
 	struct spdk_interrupt *intr;
@@ -2596,14 +2868,6 @@ spdk_interrupt_register(int efd, spdk_interrupt_fn fn,
 
 	if (spdk_unlikely(thread->state != SPDK_THREAD_STATE_RUNNING)) {
 		SPDK_ERRLOG("thread %s is marked as exited\n", thread->name);
-		return NULL;
-	}
-
-	ret = spdk_fd_group_add(thread->fgrp, efd, fn, arg, name);
-
-	if (ret != 0) {
-		SPDK_ERRLOG("thread %s: failed to add fd %d: %s\n",
-			    thread->name, efd, spdk_strerror(-ret));
 		return NULL;
 	}
 
@@ -2621,6 +2885,17 @@ spdk_interrupt_register(int efd, spdk_interrupt_fn fn,
 
 	intr->efd = efd;
 	intr->thread = thread;
+	intr->fn = fn;
+	intr->arg = arg;
+
+	ret = spdk_fd_group_add_ext(thread->fgrp, efd, _interrupt_wrapper, intr, intr->name, opts);
+
+	if (ret != 0) {
+		SPDK_ERRLOG("thread %s: failed to add fd %d: %s\n",
+			    thread->name, efd, spdk_strerror(-ret));
+		free(intr);
+		return NULL;
+	}
 
 	return intr;
 }
@@ -2679,6 +2954,12 @@ spdk_thread_get_interrupt_fd(struct spdk_thread *thread)
 	return spdk_fd_group_get_fd(thread->fgrp);
 }
 
+struct spdk_fd_group *
+spdk_thread_get_interrupt_fd_group(struct spdk_thread *thread)
+{
+	return thread->fgrp;
+}
+
 static bool g_interrupt_mode = false;
 
 int
@@ -2707,6 +2988,167 @@ bool
 spdk_interrupt_mode_is_enabled(void)
 {
 	return g_interrupt_mode;
+}
+
+#define SSPIN_DEBUG_STACK_FRAMES 16
+
+struct sspin_stack {
+	void *addrs[SSPIN_DEBUG_STACK_FRAMES];
+	uint32_t depth;
+};
+
+struct spdk_spinlock_internal {
+	struct sspin_stack init_stack;
+	struct sspin_stack lock_stack;
+	struct sspin_stack unlock_stack;
+};
+
+static void
+sspin_init_internal(struct spdk_spinlock *sspin)
+{
+#ifdef DEBUG
+	sspin->internal = calloc(1, sizeof(*sspin->internal));
+#endif
+}
+
+static void
+sspin_fini_internal(struct spdk_spinlock *sspin)
+{
+#ifdef DEBUG
+	free(sspin->internal);
+	sspin->internal = NULL;
+#endif
+}
+
+#if defined(DEBUG) && defined(SPDK_HAVE_EXECINFO_H)
+#define SSPIN_GET_STACK(sspin, which) \
+	do { \
+		if (sspin->internal != NULL) { \
+			struct sspin_stack *stack = &sspin->internal->which ## _stack; \
+			stack->depth = backtrace(stack->addrs, SPDK_COUNTOF(stack->addrs)); \
+		} \
+	} while (0)
+#else
+#define SSPIN_GET_STACK(sspin, which) do { } while (0)
+#endif
+
+static void
+sspin_stack_print(const char *title, const struct sspin_stack *sspin_stack)
+{
+#ifdef SPDK_HAVE_EXECINFO_H
+	char **stack;
+	size_t i;
+
+	stack = backtrace_symbols(sspin_stack->addrs, sspin_stack->depth);
+	if (stack == NULL) {
+		SPDK_ERRLOG("Out of memory while allocate stack for %s\n", title);
+		return;
+	}
+	SPDK_ERRLOG("  %s:\n", title);
+	for (i = 0; i < sspin_stack->depth; i++) {
+		/*
+		 * This does not print line numbers. In gdb, use something like "list *0x444b6b" or
+		 * "list *sspin_stack->addrs[0]".  Or more conveniently, load the spdk gdb macros
+		 * and use use "print *sspin" or "print sspin->internal.lock_stack".  See
+		 * gdb_macros.md in the docs directory for details.
+		 */
+		SPDK_ERRLOG("    #%" PRIu64 ": %s\n", i, stack[i]);
+	}
+	free(stack);
+#endif /* SPDK_HAVE_EXECINFO_H */
+}
+
+static void
+sspin_stacks_print(const struct spdk_spinlock *sspin)
+{
+	if (sspin->internal == NULL) {
+		return;
+	}
+	SPDK_ERRLOG("spinlock %p\n", sspin);
+	sspin_stack_print("Lock initialized at", &sspin->internal->init_stack);
+	sspin_stack_print("Last locked at", &sspin->internal->lock_stack);
+	sspin_stack_print("Last unlocked at", &sspin->internal->unlock_stack);
+}
+
+void
+spdk_spin_init(struct spdk_spinlock *sspin)
+{
+	int rc;
+
+	memset(sspin, 0, sizeof(*sspin));
+	rc = pthread_spin_init(&sspin->spinlock, PTHREAD_PROCESS_PRIVATE);
+	SPIN_ASSERT_LOG_STACKS(rc == 0, SPIN_ERR_PTHREAD, sspin);
+	sspin_init_internal(sspin);
+	SSPIN_GET_STACK(sspin, init);
+	sspin->initialized = true;
+}
+
+void
+spdk_spin_destroy(struct spdk_spinlock *sspin)
+{
+	int rc;
+
+	SPIN_ASSERT_LOG_STACKS(!sspin->destroyed, SPIN_ERR_DESTROYED, sspin);
+	SPIN_ASSERT_LOG_STACKS(sspin->initialized, SPIN_ERR_NOT_INITIALIZED, sspin);
+	SPIN_ASSERT_LOG_STACKS(sspin->thread == NULL, SPIN_ERR_LOCK_HELD, sspin);
+
+	rc = pthread_spin_destroy(&sspin->spinlock);
+	SPIN_ASSERT_LOG_STACKS(rc == 0, SPIN_ERR_PTHREAD, sspin);
+
+	sspin_fini_internal(sspin);
+	sspin->initialized = false;
+	sspin->destroyed = true;
+}
+
+void
+spdk_spin_lock(struct spdk_spinlock *sspin)
+{
+	struct spdk_thread *thread = spdk_get_thread();
+	int rc;
+
+	SPIN_ASSERT_LOG_STACKS(!sspin->destroyed, SPIN_ERR_DESTROYED, sspin);
+	SPIN_ASSERT_LOG_STACKS(sspin->initialized, SPIN_ERR_NOT_INITIALIZED, sspin);
+	SPIN_ASSERT_LOG_STACKS(thread != NULL, SPIN_ERR_NOT_SPDK_THREAD, sspin);
+	SPIN_ASSERT_LOG_STACKS(thread != sspin->thread, SPIN_ERR_DEADLOCK, sspin);
+
+	rc = pthread_spin_lock(&sspin->spinlock);
+	SPIN_ASSERT_LOG_STACKS(rc == 0, SPIN_ERR_PTHREAD, sspin);
+
+	sspin->thread = thread;
+	sspin->thread->lock_count++;
+
+	SSPIN_GET_STACK(sspin, lock);
+}
+
+void
+spdk_spin_unlock(struct spdk_spinlock *sspin)
+{
+	struct spdk_thread *thread = spdk_get_thread();
+	int rc;
+
+	SPIN_ASSERT_LOG_STACKS(!sspin->destroyed, SPIN_ERR_DESTROYED, sspin);
+	SPIN_ASSERT_LOG_STACKS(sspin->initialized, SPIN_ERR_NOT_INITIALIZED, sspin);
+	SPIN_ASSERT_LOG_STACKS(thread != NULL, SPIN_ERR_NOT_SPDK_THREAD, sspin);
+	SPIN_ASSERT_LOG_STACKS(thread == sspin->thread, SPIN_ERR_WRONG_THREAD, sspin);
+
+	SPIN_ASSERT_LOG_STACKS(thread->lock_count > 0, SPIN_ERR_LOCK_COUNT, sspin);
+	thread->lock_count--;
+	sspin->thread = NULL;
+
+	SSPIN_GET_STACK(sspin, unlock);
+
+	rc = pthread_spin_unlock(&sspin->spinlock);
+	SPIN_ASSERT_LOG_STACKS(rc == 0, SPIN_ERR_PTHREAD, sspin);
+}
+
+bool
+spdk_spin_held(struct spdk_spinlock *sspin)
+{
+	struct spdk_thread *thread = spdk_get_thread();
+
+	SPIN_ASSERT_RETURN(thread != NULL, SPIN_ERR_NOT_SPDK_THREAD, false);
+
+	return sspin->thread == thread;
 }
 
 SPDK_LOG_REGISTER_COMPONENT(thread)

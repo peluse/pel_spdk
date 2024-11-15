@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2020 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -34,6 +34,7 @@ enum dsa_opcode {
 	IDXD_OPCODE_DIF_INS	= 19,
 	IDXD_OPCODE_DIF_STRP	= 20,
 	IDXD_OPCODE_DIF_UPDT	= 21,
+	IDXD_OPCODE_DIX_GEN	= 23,
 	IDXD_OPCODE_CFLUSH	= 32,
 	IDXD_OPCODE_DECOMPRESS	= 66,
 	IDXD_OPCODE_COMPRESS	= 67,

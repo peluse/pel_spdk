@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2021 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -46,6 +46,7 @@ usage(char *program_name)
 #else
 	printf("\t[-G, --enable-debug enable debug logging (flag disabled, must reconfigure with --enable-debug)]\n");
 	printf("\t[--iova-mode <mode> specify DPDK IOVA mode: va|pa]\n");
+	printf("\t[--no-huge, SPDK is run without hugepages\n");
 #endif
 }
 
@@ -87,6 +88,8 @@ static const struct option g_cmdline_opts[] = {
 	{"logflag",			required_argument,	NULL, PERF_LOG_FLAG},
 #define PERF_IOVA_MODE		258
 	{"iova-mode",			required_argument,	NULL, PERF_IOVA_MODE},
+#define PERF_NO_HUGE		259
+	{"no-huge",		no_argument,		NULL, PERF_NO_HUGE},
 	/* Should be the last element */
 	{0, 0, 0, 0}
 };
@@ -168,6 +171,9 @@ parse_args(int argc, char **argv, struct spdk_env_opts *env_opts)
 		case PERF_IOVA_MODE:
 			env_opts->iova_mode = optarg;
 			break;
+		case PERF_NO_HUGE:
+			env_opts->no_huge = true;
+			break;
 		default:
 			usage(argv[0]);
 			return 1;
@@ -244,6 +250,7 @@ main(int argc, char **argv)
 	uint64_t tsc_end;
 	int rc;
 
+	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
 	opts.name = "connect_stress";
 	rc = parse_args(argc, argv, &opts);
@@ -268,5 +275,5 @@ main(int argc, char **argv)
 		rc = test_controller();
 	}
 
-	return 0;
+	return rc == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

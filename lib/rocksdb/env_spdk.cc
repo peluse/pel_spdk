@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2017 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -24,7 +24,7 @@ namespace rocksdb
 
 struct spdk_filesystem *g_fs = NULL;
 struct spdk_bs_dev *g_bs_dev;
-uint32_t g_lcore = 0;
+struct spdk_thread *g_app_thread;
 std::string g_bdev_name;
 volatile bool g_spdk_ready = false;
 volatile bool g_spdk_start_failure = false;
@@ -59,31 +59,15 @@ thread_local SpdkThreadCtx g_sync_args;
 static void
 set_channel()
 {
-	struct spdk_thread *thread;
-
 	if (g_fs != NULL && g_sync_args.channel == NULL) {
-		thread = spdk_thread_create("spdk_rocksdb", NULL);
-		spdk_set_thread(thread);
 		g_sync_args.channel = spdk_fs_alloc_thread_ctx(g_fs);
 	}
 }
 
 static void
-__call_fn(void *arg1, void *arg2)
-{
-	fs_request_fn fn;
-
-	fn = (fs_request_fn)arg1;
-	fn(arg2);
-}
-
-static void
 __send_request(fs_request_fn fn, void *arg)
 {
-	struct spdk_event *event;
-
-	event = spdk_event_allocate(g_lcore, __call_fn, (void *)fn, arg);
-	spdk_event_call(event);
+	spdk_thread_send_msg(g_app_thread, fn, arg);
 }
 
 static std::string
@@ -193,7 +177,7 @@ SpdkRandomAccessFile::Read(uint64_t offset, size_t n, Slice *result, char *scrat
 	set_channel();
 	rc = spdk_file_read(mFile, g_sync_args.channel, scratch, offset, n);
 	if (rc >= 0) {
-		*result = Slice(scratch, n);
+		*result = Slice(scratch, rc);
 		return Status::OK();
 	} else {
 		errno = -rc;
@@ -250,6 +234,7 @@ public:
 		mFile = NULL;
 		return Status::OK();
 	}
+	using WritableFile::Append;
 	virtual Status Append(const Slice &data) override;
 	virtual Status Flush() override
 	{
@@ -610,14 +595,10 @@ public:
  */
 void SpdkInitializeThread(void)
 {
-	struct spdk_thread *thread;
-
 	if (g_fs != NULL) {
 		if (g_sync_args.channel) {
 			spdk_fs_free_thread_ctx(g_sync_args.channel);
 		}
-		thread = spdk_thread_create("spdk_rocksdb", NULL);
-		spdk_set_thread(thread);
 		g_sync_args.channel = spdk_fs_alloc_thread_ctx(g_fs);
 	}
 }
@@ -652,7 +633,7 @@ rocksdb_run(__attribute__((unused)) void *arg1)
 		exit(1);
 	}
 
-	g_lcore = spdk_env_get_first_core();
+	g_app_thread = spdk_get_thread();
 
 	printf("using bdev %s\n", g_bdev_name.c_str());
 	spdk_fs_load(g_bs_dev, __send_request, fs_load_cb, NULL);

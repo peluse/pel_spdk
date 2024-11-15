@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -14,8 +14,8 @@
 #include <rte_version.h>
 #include <rte_eal.h>
 
-#if RTE_VERSION < RTE_VERSION_NUM(19, 11, 0, 0)
-#error RTE_VERSION is too old! Minimum 19.11 is required.
+#if RTE_VERSION < RTE_VERSION_NUM(21, 11, 0, 0)
+#error RTE_VERSION is too old! Minimum 21.11 is required.
 #endif
 
 /* x86-64 and ARM userspace virtual addresses use only the low 48 bits [0..47],
@@ -51,5 +51,15 @@ void vtophys_pci_device_added(struct rte_pci_device *pci_device);
  * This must be called before a `rte_pci_device` is destroyed.
  */
 void vtophys_pci_device_removed(struct rte_pci_device *pci_device);
+
+/**
+ * Disable huge page usage based on SPDK command line option --no-huge.
+ */
+void mem_disable_huge_pages(void);
+
+/**
+ * Enforce socket ID allocations.
+ */
+void mem_enforce_numa(void);
 
 #endif

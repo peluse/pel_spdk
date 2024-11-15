@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2019 Intel Corporation
+#  All rights reserved.
+#
 curdir=$(dirname $(readlink -f "${BASH_SOURCE[0]}"))
 rootdir=$(readlink -f $curdir/../../..)
 
@@ -82,8 +85,8 @@ config+=(
 cat <<- CONFIG > "$curdir/modes.conf"
 	{"subsystems":[
 	$(
-	IFS=","
-	printf '%s\n' "${config[*]}"
+		IFS=","
+		printf '%s\n' "${config[*]}"
 	)
 	]}]}
 CONFIG

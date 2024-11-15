@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -56,6 +56,9 @@ static const struct nvme_quirk nvme_quirks[] = {
 		NVME_QUIRK_DELAY_BEFORE_CHK_RDY
 	},
 	{	{SPDK_PCI_CLASS_NVME, SPDK_PCI_VID_SAMSUNG, 0xa822, SPDK_PCI_ANY_ID, SPDK_PCI_ANY_ID},
+		NVME_QUIRK_DELAY_BEFORE_CHK_RDY
+	},
+	{	{SPDK_PCI_CLASS_NVME, SPDK_PCI_VID_SAMSUNG, 0xa826, SPDK_PCI_ANY_ID, SPDK_PCI_ANY_ID},
 		NVME_QUIRK_DELAY_BEFORE_CHK_RDY
 	},
 	{	{SPDK_PCI_CLASS_NVME, SPDK_PCI_VID_VIRTUALBOX, 0x4e56, SPDK_PCI_ANY_ID, SPDK_PCI_ANY_ID},

@@ -86,20 +86,27 @@ The DSA hardware supports a limited queue depth and channels. This means that
 only a limited number of `spdk_thread`s will be able to acquire a channel.
 Design software to deal with the inability to get a channel.
 
-### How to use kernel idxd driver {#accel_idxd_kernel}
+**Important**: The devices `PCI_DEVICE_ID_INTEL_DSA_SPR0` and `PCI_DEVICE_ID_INTEL_IAX_SPR0`
+have been added to the vfio_pci denylist. This prevents the use of userspace DSA and IAA drivers
+from SPDK on systems that are affected.
+
+**Additionally**, to use the kernel DSA driver from SPDK, users are required to possess
+the `CAP_SYS_RAWIO` capability.
+
+#### How to use kernel idxd driver {#accel_idxd_kernel}
 
 There are several dependencies to leverage the Linux idxd driver for driving DSA devices.
 
 1 Linux kernel support: You need to have a Linux kernel with the `idxd` driver
-loaded. Futher, add the following command line options to the kernel boot
+loaded. Further, add the following command line options to the kernel boot
 commands:
 
 ```bash
 intel_iommu=on,sm_on
 ```
 
-2 User library dependency: Users need to install the `accel-config` library.
-This is often packaged, but the source is available on
+2 User library dependency: Users need to install the developer version of the
+`accel-config` library. This is often packaged, but the source is available on
 [GitHub](https://github.com/intel/idxd-config). After the library is installed,
 users can use the `accel-config` command to configure the work queues(WQs) of
 the idxd devices managed by the kernel with the following steps:
@@ -139,6 +146,23 @@ enabled via startup RPC as discussed earlier, the software module will use ISA-L
 if available for functions such as CRC32C. Otherwise, standard glibc calls are
 used to back the framework API.
 
+### dpdk_cryptodev {#accel_dpdk_cryptodev}
+
+The dpdk_cryptodev module uses DPDK CryptoDev API to implement crypto operations.
+The following ciphers and PMDs are supported:
+
+- AESN-NI Multi Buffer Crypto Poll Mode Driver: RTE_CRYPTO_CIPHER_AES128_CBC
+- Intel(R) QuickAssist (QAT) Crypto Poll Mode Driver: RTE_CRYPTO_CIPHER_AES128_CBC,
+  RTE_CRYPTO_CIPHER_AES128_XTS
+  (Note: QAT is functional however is marked as experimental until the hardware has
+  been fully integrated with the SPDK CI system.)
+- MLX5 Crypto Poll Mode Driver: RTE_CRYPTO_CIPHER_AES256_XTS, RTE_CRYPTO_CIPHER_AES512_XTS
+- UADK Crypto Poll Mode Driver: RTE_CRYPTO_CIPHER_AES256_XTS, RTE_CRYPTO_CIPHER_AES512_XTS
+
+To enable this module, use [`dpdk_cryptodev_scan_accel_module`](https://spdk.io/doc/jsonrpc.html),
+this RPC is available in STARTUP state and the SPDK application needs to be run with `--wait-for-rpc`
+CLI parameter. To select a specific PMD, use [`dpdk_cryptodev_set_driver`](https://spdk.io/doc/jsonrpc.html)
+
 ### Module to Operation Code Assignment {#accel_assignments}
 
 When multiple modules are initialized, the accel framework will assign op codes to
@@ -155,7 +179,7 @@ The following RPCs would accomplish the copy override:
 
 ```bash
 ./scripts/rpc.py dsa_scan_accel_module
-./scripts/rpc.py accel_assign_opc -o copy -e software
+./scripts/rpc.py accel_assign_opc -o copy -m software
 ./scripts/rpc.py framework_start_init
 ./scripts/rpc.py accel_get_opc_assignments
 {
@@ -170,5 +194,5 @@ The following RPCs would accomplish the copy override:
 }
 ```
 
-To detemine the name of available modules and their supported operations use the
+To determine the name of available modules and their supported operations use the
 RPC `accel_get_module_info`.

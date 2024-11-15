@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2017 Intel Corporation.
  *   All rights reserved.
- *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #ifndef SPDK_BLOBSTORE_H
@@ -12,6 +12,7 @@
 #include "spdk/queue.h"
 #include "spdk/util.h"
 #include "spdk/tree.h"
+#include "spdk/thread.h"
 
 #include "request.h"
 
@@ -50,6 +51,9 @@ struct spdk_blob_mut_data {
 	 * equal to 'num_clusters'.
 	 */
 	size_t		cluster_array_size;
+
+	/* The number of allocated clusters in the clusters array */
+	uint64_t	num_allocated_clusters;
 
 	/* Number of extent pages */
 	uint64_t	num_extent_pages;
@@ -160,17 +164,17 @@ struct spdk_blob_store {
 
 	struct spdk_bs_dev		*dev;
 
-	struct spdk_bit_array		*used_md_pages;
-	struct spdk_bit_pool		*used_clusters;
+	struct spdk_bit_array		*used_md_pages;		/* Protected by used_lock */
+	struct spdk_bit_pool		*used_clusters;		/* Protected by used_lock */
 	struct spdk_bit_array		*used_blobids;
 	struct spdk_bit_array		*open_blobids;
 
-	pthread_mutex_t			used_clusters_mutex;
+	struct spdk_spinlock		used_lock;
 
 	uint32_t			cluster_sz;
 	uint64_t			total_clusters;
 	uint64_t			total_data_clusters;
-	uint64_t			num_free_clusters;
+	uint64_t			num_free_clusters;	/* Protected by used_lock */
 	uint64_t			pages_per_cluster;
 	uint8_t				pages_per_cluster_shift;
 	uint32_t			io_unit_size;
@@ -185,6 +189,17 @@ struct spdk_blob_store {
 	TAILQ_HEAD(, spdk_blob_list)	snapshots;
 
 	bool				clean;
+
+	spdk_bs_esnap_dev_create	esnap_bs_dev_create;
+	void				*esnap_ctx;
+
+	/* If external snapshot channels are being destroyed while
+	 * the blobstore is unloaded, the unload is deferred until
+	 * after the channel destruction completes.
+	 */
+	uint32_t			esnap_channels_unloading;
+	spdk_bs_op_complete		esnap_unload_cb_fn;
+	void				*esnap_unload_cb_arg;
 };
 
 struct spdk_bs_channel {
@@ -201,6 +216,8 @@ struct spdk_bs_channel {
 
 	TAILQ_HEAD(, spdk_bs_request_set) need_cluster_alloc;
 	TAILQ_HEAD(, spdk_bs_request_set) queued_io;
+
+	RB_HEAD(blob_esnap_channel_tree, blob_esnap_channel) esnap_channels;
 };
 
 /** operation type */
@@ -218,6 +235,7 @@ enum spdk_blob_op_type {
 #define BLOB_SNAPSHOT "SNAP"
 #define SNAPSHOT_IN_PROGRESS "SNAPTMP"
 #define SNAPSHOT_PENDING_REMOVAL "SNAPRM"
+#define BLOB_EXTERNAL_SNAPSHOT_ID "EXTSNAP"
 
 struct spdk_blob_bs_dev {
 	struct spdk_bs_dev bs_dev;
@@ -312,10 +330,12 @@ struct spdk_blob_md_descriptor_extent_page {
 	uint32_t	cluster_idx[0];
 };
 
-#define SPDK_BLOB_THIN_PROV (1ULL << 0)
-#define SPDK_BLOB_INTERNAL_XATTR (1ULL << 1)
-#define SPDK_BLOB_EXTENT_TABLE (1ULL << 2)
-#define SPDK_BLOB_INVALID_FLAGS_MASK	(SPDK_BLOB_THIN_PROV | SPDK_BLOB_INTERNAL_XATTR | SPDK_BLOB_EXTENT_TABLE)
+#define SPDK_BLOB_THIN_PROV		(1ULL << 0)
+#define SPDK_BLOB_INTERNAL_XATTR	(1ULL << 1)
+#define SPDK_BLOB_EXTENT_TABLE		(1ULL << 2)
+#define SPDK_BLOB_EXTERNAL_SNAPSHOT	(1ULL << 3)
+#define SPDK_BLOB_INVALID_FLAGS_MASK	(SPDK_BLOB_THIN_PROV | SPDK_BLOB_INTERNAL_XATTR | \
+					 SPDK_BLOB_EXTENT_TABLE | SPDK_BLOB_EXTERNAL_SNAPSHOT)
 
 #define SPDK_BLOB_READ_ONLY (1ULL << 0)
 #define SPDK_BLOB_DATA_RO_FLAGS_MASK	SPDK_BLOB_READ_ONLY
@@ -413,6 +433,9 @@ SPDK_STATIC_ASSERT(sizeof(struct spdk_bs_super_block) == 0x1000, "Invalid super 
 
 struct spdk_bs_dev *bs_create_zeroes_dev(void);
 struct spdk_bs_dev *bs_create_blob_bs_dev(struct spdk_blob *blob);
+struct spdk_io_channel *blob_esnap_get_io_channel(struct spdk_io_channel *ch,
+		struct spdk_blob *blob);
+bool blob_backed_with_zeroes_dev(struct spdk_blob *blob);
 
 /* Unit Conversions
  *
@@ -613,7 +636,7 @@ bs_num_io_units_to_cluster_boundary(struct spdk_blob *blob, uint64_t io_unit)
 }
 
 /* Given an io_unit offset into a blob, look up the number of pages into blob to beginning of current cluster */
-static inline uint32_t
+static inline uint64_t
 bs_io_unit_to_cluster_start(struct spdk_blob *blob, uint64_t io_unit)
 {
 	uint64_t	pages_per_cluster;
@@ -631,7 +654,7 @@ bs_io_unit_to_cluster_number(struct spdk_blob *blob, uint64_t io_unit)
 {
 	uint64_t	pages_per_cluster = blob->bs->pages_per_cluster;
 	uint8_t		shift = blob->bs->pages_per_cluster_shift;
-	uint32_t	page_offset;
+	uint64_t	page_offset;
 
 	page_offset = io_unit / bs_io_unit_per_page(blob->bs);
 	if (shift != 0) {

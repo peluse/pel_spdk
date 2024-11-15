@@ -1,5 +1,5 @@
 #  SPDX-License-Identifier: BSD-3-Clause
-#  Copyright (c) Intel Corporation.
+#  Copyright (C) 2018 Intel Corporation.
 #  All rights reserved.
 #
 
@@ -21,12 +21,19 @@ endif
 
 ifeq ($(OS),Linux)
 SPDK_LIB_LIST += event_nbd
+ifeq ($(CONFIG_UBLK),y)
+SPDK_LIB_LIST += event_ublk
+endif
 ifeq ($(CONFIG_VHOST),y)
 SPDK_LIB_LIST += event_vhost_blk event_vhost_scsi
 endif
 ifeq ($(CONFIG_VFIO_USER),y)
 SPDK_LIB_LIST += event_vfu_tgt
 endif
+endif
+
+ifeq ($(CONFIG_FSDEV),y)
+SPDK_LIB_LIST += event_fsdev
 endif
 
 include $(SPDK_ROOT_DIR)/mk/spdk.app.mk

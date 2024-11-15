@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2021 Intel Corporation
+#  All rights reserved.
+#
 
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../../..)
@@ -19,8 +23,8 @@ $rpc_py bdev_null_create NULL1 1000 512
 $rpc_py bdev_delay_create -b NULL1 -d Delay0 -r 1000000 -t 1000000 -w 1000000 -n 1000000
 $rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Delay0
 
-$SPDK_EXAMPLE_DIR/perf -c 0xC -r "trtype:$TEST_TRANSPORT adrfam:IPv4 traddr:$NVMF_FIRST_TARGET_IP trsvcid:$NVMF_PORT" \
-	-t 5 -q 128 -w randrw -M 70 -o 512 -P 4 &
+"$SPDK_BIN_DIR/spdk_nvme_perf" -c 0xC -r "trtype:$TEST_TRANSPORT adrfam:IPv4 traddr:$NVMF_FIRST_TARGET_IP trsvcid:$NVMF_PORT" \
+	-t 5 -q 128 -w randrw -M 70 -o 512 -P 4 "${NO_HUGE[@]}" &
 perf_pid=$!
 
 sleep 2
@@ -37,13 +41,16 @@ while kill -0 $perf_pid; do
 	fi
 done
 
+# Verify perf's exit status to make sure we catch a potential crash
+NOT wait "$perf_pid"
+
 #check that traffic goes when a new subsystem is created
 $rpc_py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK00000000000001 -m 10
 $rpc_py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t $TEST_TRANSPORT -a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT
 $rpc_py nvmf_subsystem_add_ns nqn.2016-06.io.spdk:cnode1 Delay0
 
-$SPDK_EXAMPLE_DIR/perf -c 0xC -r "trtype:$TEST_TRANSPORT adrfam:IPv4 traddr:$NVMF_FIRST_TARGET_IP trsvcid:$NVMF_PORT" \
-	-t 3 -q 128 -w randrw -M 70 -o 512 -P 4 &
+$SPDK_BIN_DIR/spdk_nvme_perf -c 0xC -r "trtype:$TEST_TRANSPORT adrfam:IPv4 traddr:$NVMF_FIRST_TARGET_IP trsvcid:$NVMF_PORT" \
+	-t 3 -q 128 -w randrw -M 70 -o 512 -P 4 "${NO_HUGE[@]}" &
 perf_pid=$!
 
 delay=0
@@ -55,6 +62,9 @@ while kill -0 $perf_pid; do
 		false
 	fi
 done
+
+# Verify perf's exit status to make sure we catch a potential crash
+wait "$perf_pid"
 
 trap - SIGINT SIGTERM EXIT
 

@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2017 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  */
 
@@ -10,10 +10,14 @@
 #ifndef SPDK_VERSION_H
 #define SPDK_VERSION_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /**
  * Major version number (year of original release minus 2000).
  */
-#define SPDK_VERSION_MAJOR	23
+#define SPDK_VERSION_MAJOR	25
 
 /**
  * Minor version number (month of original release).
@@ -87,5 +91,9 @@
 	SPDK_VERSION_PATCH_STRING \
 	SPDK_VERSION_SUFFIX \
 	SPDK_GIT_COMMIT_STRING_SHA1
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

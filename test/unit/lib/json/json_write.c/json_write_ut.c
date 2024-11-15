@@ -1,11 +1,11 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
 #include "spdk/stdinc.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "json/json_write.c"
 #include "json/json_parse.c"
@@ -48,6 +48,10 @@ write_cb(void *cb_ctx, const void *data, size_t size)
 
 #define END_NOCMP() \
 	CU_ASSERT(spdk_json_write_end(w) == 0)
+
+#define END_SIZE_NOCMP(size) \
+	CU_ASSERT(spdk_json_write_end(w) == 0); \
+	CU_ASSERT(g_write_pos - g_buf == size)
 
 #define END_FAIL() \
 	CU_ASSERT(spdk_json_write_end(w) < 0)
@@ -93,6 +97,10 @@ write_cb(void *cb_ctx, const void *data, size_t size)
 	CU_ASSERT(spdk_json_write_uint128(w, low, high) == 0);
 #define VAL_NAME_UINT128(name, low, high) \
 	CU_ASSERT(spdk_json_write_named_uint128(w, name, low, high) == 0);
+
+#define VAL_DOUBLE(d) CU_ASSERT(spdk_json_write_double(w, d) == 0);
+
+#define VAL_UUID(u) CU_ASSERT(spdk_json_write_uuid(w, u) == 0)
 
 #define VAL_ARRAY_BEGIN() CU_ASSERT(spdk_json_write_array_begin(w) == 0)
 #define VAL_ARRAY_END() CU_ASSERT(spdk_json_write_array_end(w) == 0)
@@ -522,6 +530,45 @@ test_write_number_uint64(void)
 }
 
 static void
+test_write_number_double(void)
+{
+	struct spdk_json_write_ctx *w;
+
+	BEGIN();
+	VAL_DOUBLE(0);
+	END_SIZE("0.00000000000000000000e+00", 26);
+
+	BEGIN();
+	VAL_DOUBLE(1.2);
+	END_SIZE("1.19999999999999995559e+00", 26);
+
+
+	BEGIN();
+	VAL_DOUBLE(1234.5678);
+	END_SIZE("1.23456780000000003383e+03", 26);
+
+	BEGIN();
+	VAL_DOUBLE(-1234.5678);
+	END_SIZE("-1.23456780000000003383e+03", 27);
+}
+
+static void
+test_write_uuid(void)
+{
+#define UT_UUID "e524acae-8c26-43e4-882a-461b8690583b"
+	struct spdk_json_write_ctx *w;
+	struct spdk_uuid uuid;
+	int rc;
+
+	rc = spdk_uuid_parse(&uuid, UT_UUID);
+	CU_ASSERT_EQUAL(rc, 0);
+
+	BEGIN();
+	VAL_UUID(&uuid);
+	END("\"" UT_UUID "\"");
+}
+
+static void
 test_write_array(void)
 {
 	struct spdk_json_write_ctx *w;
@@ -822,7 +869,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("json", NULL, NULL);
@@ -837,16 +883,16 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_write_string_number_uint128);
 	CU_ADD_TEST(suite, test_write_number_int64);
 	CU_ADD_TEST(suite, test_write_number_uint64);
+	CU_ADD_TEST(suite, test_write_number_double);
+	CU_ADD_TEST(suite, test_write_uuid);
 	CU_ADD_TEST(suite, test_write_array);
 	CU_ADD_TEST(suite, test_write_object);
 	CU_ADD_TEST(suite, test_write_nesting);
 	CU_ADD_TEST(suite, test_write_val);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
 
-	CU_basic_run_tests();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 
-	num_failures = CU_get_number_of_failures();
 	CU_cleanup_registry();
 
 	return num_failures;

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2021 Intel Corporation
+#  All rights reserved.
+#
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/common/autotest_common.sh
@@ -12,7 +15,7 @@ rpc_py="$rootdir/scripts/rpc.py -s $(get_vhost_dir 0)/rpc.sock"
 fio_bin="--fio-bin=$FIO_BIN"
 vm_no="2"
 
-trap 'clean_vfio_user "${FUNCNAME}" "${LINENO}"' ERR
+trap 'clean_vfio_user' EXIT
 vhosttestinit
 
 timing_enter start_vfio_user
@@ -42,7 +45,7 @@ timing_exit start_vfio_user
 used_vms=""
 timing_enter launch_vms
 for i in $(seq 0 $vm_no); do
-	vm_setup --disk-type=vfio_user --force=$i --os=$VM_IMAGE --disks="$i"
+	vm_setup --disk-type=vfio_user --force=$i --os=$VM_IMAGE --memory=768 --disks="$i"
 	used_vms+=" $i"
 done
 

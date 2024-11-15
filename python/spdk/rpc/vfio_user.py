@@ -1,3 +1,8 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation.
+#  All rights reserved.
+
+
 def vfu_tgt_set_base_path(client, path):
     """Set socket base path.
 
@@ -106,3 +111,31 @@ def vfu_virtio_create_scsi_endpoint(client, name, cpumask, num_io_queues, qsize,
         params['packed_ring'] = packed_ring
 
     return client.call('vfu_virtio_create_scsi_endpoint', params)
+
+
+def vfu_virtio_create_fs_endpoint(client, name, fsdev_name, tag, cpumask, num_queues, qsize, packed_ring):
+    """Create virtio-fs endpoint.
+
+    Args:
+        name: endpoint name
+        fsdev_name: name of block device
+        cpumask: CPU core mask
+        num_queues: number of vrings
+        qsize: number of element of each vring
+        packed_ring: enable packed ring
+    """
+    params = {
+            'name': name,
+            'fsdev_name': fsdev_name,
+            'tag': tag
+    }
+    if cpumask:
+        params['cpumask'] = cpumask
+    if num_queues:
+        params['num_queues'] = num_queues
+    if qsize:
+        params['qsize'] = qsize
+    if packed_ring:
+        params['packed_ring'] = packed_ring
+
+    return client.call('vfu_virtio_create_fs_endpoint', params)

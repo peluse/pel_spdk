@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation
+#  All rights reserved.
+#
 
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../..)
@@ -54,6 +58,7 @@ waitforbdev ftl0
 
 bdev_info=$($rpc_py bdev_get_bdevs -b ftl0)
 nb=$(jq ".[] .num_blocks" <<< "$bdev_info")
+$rpc_py bdev_ftl_unload -b ftl0
 
 killprocess $svcpid
 

@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2016 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
- *   Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2021, 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 /** \file
@@ -13,6 +13,7 @@
 
 #include "spdk/stdinc.h"
 
+#include "spdk/accel.h"
 #include "spdk/scsi_spec.h"
 #include "spdk/nvme_spec.h"
 #include "spdk/json.h"
@@ -119,8 +120,21 @@ enum spdk_bdev_io_type {
 	SPDK_BDEV_IO_TYPE_ABORT,
 	SPDK_BDEV_IO_TYPE_SEEK_HOLE,
 	SPDK_BDEV_IO_TYPE_SEEK_DATA,
+	SPDK_BDEV_IO_TYPE_COPY,
+	SPDK_BDEV_IO_TYPE_NVME_IOV_MD,
 	SPDK_BDEV_NUM_IO_TYPES /* Keep last */
 };
+
+/**
+ * Structure with optional enable histogram parameters
+ */
+struct spdk_bdev_enable_histogram_opts {
+	/** Size of this structure in bytes */
+	size_t size;
+
+	uint8_t io_type;
+} __attribute__((packed));
+SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_enable_histogram_opts) == 9, "Incorrect size");
 
 /** bdev QoS rate limit type */
 enum spdk_bdev_qos_rate_limit_type {
@@ -149,6 +163,8 @@ typedef void (*spdk_bdev_io_completion_cb)(struct spdk_bdev_io *bdev_io,
 		bool success,
 		void *cb_arg);
 
+struct spdk_bdev_io_error_stat;
+
 struct spdk_bdev_io_stat {
 	uint64_t bytes_read;
 	uint64_t num_read_ops;
@@ -156,10 +172,28 @@ struct spdk_bdev_io_stat {
 	uint64_t num_write_ops;
 	uint64_t bytes_unmapped;
 	uint64_t num_unmap_ops;
+	uint64_t bytes_copied;
+	uint64_t num_copy_ops;
 	uint64_t read_latency_ticks;
+	uint64_t max_read_latency_ticks;
+	uint64_t min_read_latency_ticks;
 	uint64_t write_latency_ticks;
+	uint64_t max_write_latency_ticks;
+	uint64_t min_write_latency_ticks;
 	uint64_t unmap_latency_ticks;
+	uint64_t max_unmap_latency_ticks;
+	uint64_t min_unmap_latency_ticks;
+	uint64_t copy_latency_ticks;
+	uint64_t max_copy_latency_ticks;
+	uint64_t min_copy_latency_ticks;
 	uint64_t ticks_rate;
+
+	/* This data structure is privately defined in the bdev library.
+	 * This data structure is only used by the bdev_get_iostat RPC now.
+	 */
+	struct spdk_bdev_io_error_stat *io_error;
+
+	/* For efficient deep copy, no members should be added after io_error. */
 };
 
 struct spdk_bdev_opts {
@@ -178,14 +212,63 @@ struct spdk_bdev_opts {
 	 */
 	size_t opts_size;
 
-	uint32_t small_buf_pool_size;
-	uint32_t large_buf_pool_size;
+	/* Size of the per-thread iobuf caches */
+	uint32_t iobuf_small_cache_size;
+	uint32_t iobuf_large_cache_size;
 } __attribute__((packed));
 SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_opts) == 32, "Incorrect size");
 
 /**
+ * Union for controller attributes field, to list whether bdev supports fdp etc.
+ * By convention we match the NVMe definition, allowing other bdevs to use this feature
+ */
+union spdk_bdev_nvme_ctratt {
+	uint32_t raw;
+
+	struct {
+		uint32_t reserved	: 19;
+		/* Supports flexible data placement */
+		uint32_t fdps		: 1;
+		uint32_t reserved2	: 12;
+	} bits;
+};
+SPDK_STATIC_ASSERT(sizeof(union spdk_bdev_nvme_ctratt) == 4, "Incorrect size");
+
+/**
+ * Union for command dword 12, which by convention matches the NVMe command dword 12 definition.
+ * This is used to pass NVMe specific fields to bdevs, that reports support for them as indicated
+ * by \ref spdk_bdev_get_nvme_ctratt
+ */
+union spdk_bdev_nvme_cdw12 {
+	uint32_t raw;
+
+	struct {
+		uint32_t reserved	: 20;
+		/* Directive type */
+		uint32_t dtype		: 4;
+		uint32_t reserved2	: 8;
+	} write;
+};
+SPDK_STATIC_ASSERT(sizeof(union spdk_bdev_nvme_cdw12) == 4, "Incorrect size");
+
+/**
+ * Union for command dword 13, which by convention matches the NVMe command dword 13 definition.
+ * This is used to pass NVMe specific fields to bdevs, that reports support for them as indicated
+ * by \ref spdk_bdev_get_nvme_ctratt
+ */
+union spdk_bdev_nvme_cdw13 {
+	uint32_t raw;
+
+	struct {
+		uint32_t reserved	: 16;
+		/* Directive specific */
+		uint32_t dspec		: 16;
+	} write;
+};
+SPDK_STATIC_ASSERT(sizeof(union spdk_bdev_nvme_cdw13) == 4, "Incorrect size");
+
+/**
  * Structure with optional IO request parameters
- * The content of this structure must be valid until the IO request is completed
  */
 struct spdk_bdev_ext_io_opts {
 	/** Size of this structure in bytes */
@@ -199,8 +282,23 @@ struct spdk_bdev_ext_io_opts {
 	void *memory_domain_ctx;
 	/** Metadata buffer, optional */
 	void *metadata;
+	/**
+	 * Sequence of accel operations to be executed before/after (depending on the IO type) the
+	 * request is submitted.
+	 */
+	struct spdk_accel_sequence *accel_sequence;
+	/**
+	 * Specify which DIF check flags to exclude on a per-IO basis. The default value is
+	 * all zeroes, which includes all of the flags set for this bdev. If any of the flags
+	 * is set, that flag will be excluded from any DIF operations for this IO.
+	 */
+	uint32_t dif_check_flags_exclude_mask;
+	/** defined by \ref spdk_bdev_nvme_cdw12 */
+	union spdk_bdev_nvme_cdw12 nvme_cdw12;
+	/** defined by \ref spdk_bdev_nvme_cdw13 */
+	union spdk_bdev_nvme_cdw13 nvme_cdw13;
 } __attribute__((packed));
-SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_ext_io_opts) == 32, "Incorrect size");
+SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_ext_io_opts) == 52, "Incorrect size");
 
 /**
  * Get the options for the bdev module.
@@ -213,6 +311,15 @@ void spdk_bdev_get_opts(struct spdk_bdev_opts *opts, size_t opts_size);
 int spdk_bdev_set_opts(struct spdk_bdev_opts *opts);
 
 typedef void (*spdk_bdev_wait_for_examine_cb)(void *arg);
+
+enum spdk_bdev_reset_stat_mode {
+	/** Reset all stats */
+	SPDK_BDEV_RESET_STAT_ALL,
+	/** Reset only max and min stats */
+	SPDK_BDEV_RESET_STAT_MAXMIN,
+	/** Do not reset stats at all */
+	SPDK_BDEV_RESET_STAT_NONE,
+};
 
 /**
  * Report when all bdevs finished the examine process.
@@ -228,6 +335,8 @@ int spdk_bdev_wait_for_examine(spdk_bdev_wait_for_examine_cb cb_fn, void *cb_arg
 
 /**
  * Examine a block device explicitly
+ *
+ * This function must be called from the SPDK app thread.
  *
  * \param name the name or alias of the block device
  * \return 0 if block device was examined successfully, suitable errno value otherwise
@@ -353,6 +462,53 @@ int spdk_bdev_open_ext(const char *bdev_name, bool write, spdk_bdev_event_cb_t e
 		       void *event_ctx, struct spdk_bdev_desc **desc);
 
 /**
+ * Block device asynchronous open callback.
+ *
+ * \param desc Output parameter for the descriptor when operation is successful.
+ * \param rc 0 if block device is opened successfully or negated errno if failed.
+ * \param cb_arg Callback argument.
+ */
+typedef void (*spdk_bdev_open_async_cb_t)(struct spdk_bdev_desc *desc, int rc, void *cb_arg);
+
+/**
+ * Structure with optional asynchronous bdev open parameters.
+ */
+struct spdk_bdev_open_async_opts {
+	/* Size of this structure in bytes. */
+	size_t size;
+	/*
+	 * Time in milliseconds to wait for the block device to appear.
+	 *
+	 * When the block device does not exist, wait until the block device appears or the timeout
+	 * is expired if nonzero, or return immediately otherwise.
+	 *
+	 * Default value is zero and is used when options are omitted.
+	 */
+	uint64_t timeout_ms;
+};
+SPDK_STATIC_ASSERT(sizeof(struct spdk_bdev_open_async_opts) == 16, "Incorrect size");
+
+/**
+ * Open a block device for I/O operations asynchronously with options.
+ *
+ * \param bdev_name Block device name to open.
+ * \param write true is read/write access requested, false if read-only
+ * \param event_cb Notification callback to be called when the bdev triggers
+ * asynchronous event such as bdev removal. This will always be called on the
+ * same thread that spdk_bdev_open_async() was called on. In case of removal event
+ * the descriptor will have to be manually closed to make the bdev unregister
+ * proceed.
+ * \param event_ctx param for event_cb.
+ * \param opts Options for asynchronous block device open. If NULL, default values are used.
+ * \param open_cb Open callback.
+ * \param open_cb_arg Parameter for open_cb.
+ * \return 0 if operation started successfully, suitable errno value otherwise
+ */
+int spdk_bdev_open_async(const char *bdev_name, bool write, spdk_bdev_event_cb_t event_cb,
+			 void *event_ctx, struct spdk_bdev_open_async_opts *opts,
+			 spdk_bdev_open_async_cb_t open_cb, void *open_cb_arg);
+
+/**
  * Close a previously opened block device.
  *
  * Must be called on the same thread that the spdk_bdev_open_ext()
@@ -361,6 +517,16 @@ int spdk_bdev_open_ext(const char *bdev_name, bool write, spdk_bdev_event_cb_t e
  * \param desc Block device descriptor to close.
  */
 void spdk_bdev_close(struct spdk_bdev_desc *desc);
+
+/**
+ * Get the NUMA node ID for the specified bdev.
+ *
+ * \param bdev Block device to get the NUMA node ID for
+ *
+ * \returns NUMA node ID for the bdev, SPDK_ENV_NODE_ID_ANY if the ID
+ *	    ID is unknown.
+ */
+int32_t spdk_bdev_get_numa_id(struct spdk_bdev *bdev);
 
 /**
  * Callback function for spdk_for_each_bdev() and spdk_for_each_bdev_leaf().
@@ -380,7 +546,7 @@ typedef int (*spdk_for_each_bdev_fn)(void *ctx, struct spdk_bdev *bdev);
  * \param ctx Context passed to the callback function.
  * \param fn Callback function for each block device.
  *
- * \return 0 if operation is sucessful, or suitable errno value one of the
+ * \return 0 if operation is successful, or suitable errno value one of the
  * callback returned otherwise.
  */
 int spdk_for_each_bdev(void *ctx, spdk_for_each_bdev_fn fn);
@@ -393,7 +559,7 @@ int spdk_for_each_bdev(void *ctx, spdk_for_each_bdev_fn fn);
  * callback function for each unclaimed bdev internally.
  *
  * \param ctx Context passed to the callback function.
- * \param fn Callback funciton for each block device without virtual block devices on top.
+ * \param fn Callback function for each block device without virtual block devices on top.
  *
  * \return 0 if operation is successful, or suitable errno value one of the
  * callback returned otherwise.
@@ -437,6 +603,23 @@ int spdk_bdev_set_timeout(struct spdk_bdev_desc *desc, uint64_t timeout_in_sec,
  * \return true if support, false otherwise.
  */
 bool spdk_bdev_io_type_supported(struct spdk_bdev *bdev, enum spdk_bdev_io_type io_type);
+
+/**
+ * return the name of an IO type based on the io_type.
+ *
+ * \param io_type The specific I/O type like read, write, flush, unmap.
+ * \return Name of the IO type as a null-terminated string.
+ */
+const char *spdk_bdev_get_io_type_name(enum spdk_bdev_io_type io_type);
+
+/**
+ * Return the io_type based on the io_type_string.
+ *
+ * \param io_type_string Name of the IO type as a null-terminated string.
+ * \return io_type The specific I/O type like read, write, flush, unmap etc.
+ * This will map to enum spdk_bdev_io_type.
+ */
+int spdk_bdev_get_io_type(const char *io_type_string);
 
 /**
  * Output driver-specific information to a JSON stream.
@@ -648,11 +831,21 @@ uint32_t spdk_bdev_get_physical_block_size(const struct spdk_bdev *bdev);
 enum spdk_dif_type spdk_bdev_get_dif_type(const struct spdk_bdev *bdev);
 
 /**
- * Check whether DIF is set in the first 8 bytes or the last 8 bytes of metadata.
+ * Get DIF protection information format of the block device.
+ *
+ * Note that this function is valid only if DIF type is not SPDK_DIF_DISABLE.
  *
  * \param bdev Block device to query.
- * \return true if DIF is set in the first 8 bytes of metadata, or false
- * if DIF is set in the last 8 bytes of metadata.
+ * \return DIF protection information format of the block device.
+ */
+enum spdk_dif_pi_format spdk_bdev_get_dif_pi_format(const struct spdk_bdev *bdev);
+
+/**
+ * Check whether DIF is set in the first 8/16 bytes or the last 8/16 bytes of metadata.
+ *
+ * \param bdev Block device to query.
+ * \return true if DIF is set in the first 8/16 bytes of metadata, or false
+ * if DIF is set in the last 8/16 bytes of metadata.
  *
  * Note that this function is valid only if DIF type is not SPDK_DIF_DISABLE.
  */
@@ -667,6 +860,14 @@ bool spdk_bdev_is_dif_head_of_md(const struct spdk_bdev *bdev);
  */
 bool spdk_bdev_is_dif_check_enabled(const struct spdk_bdev *bdev,
 				    enum spdk_dif_check_type check_type);
+
+/**
+ * Get block device max copy size.
+ *
+ * \param bdev Block device to query.
+ * \return Max copy size for this bdev in blocks. 0 means unlimited.
+ */
+uint32_t spdk_bdev_get_max_copy(const struct spdk_bdev *bdev);
 
 /**
  * Get the most recently measured queue depth from a bdev.
@@ -1001,9 +1202,8 @@ int spdk_bdev_readv_blocks_with_md(struct spdk_bdev_desc *desc, struct spdk_io_c
  * \param num_blocks The number of blocks to read.
  * \param cb Called when the request is complete.
  * \param cb_arg Argument passed to cb.
- * \param opts Optional structure with extended IO request options. If set, this structure must be
- * valid until the IO is completed. `size` member of this structure is used for ABI compatibility and
- * must be set to sizeof(struct spdk_bdev_ext_io_opts).
+ * \param opts Optional structure with extended IO request options. `size` member of this structure
+ *             is used for ABI compatibility and must be set to sizeof(struct spdk_bdev_ext_io_opts).
  *
  * \return 0 on success. On success, the callback will always
  * be called (even if the request ultimately failed). Return
@@ -1204,9 +1404,8 @@ int spdk_bdev_writev_blocks_with_md(struct spdk_bdev_desc *desc, struct spdk_io_
  * \param num_blocks The number of blocks to write.
  * \param cb Called when the request is complete.
  * \param cb_arg Argument passed to cb.
- * \param opts Optional structure with extended IO request options. If set, this structure must be
- * valid until the IO is completed. `size` member of this structure is used for ABI compatibility and
- * must be set to sizeof(struct spdk_bdev_ext_io_opts).
+ * \param opts Optional structure with extended IO request options. `size` member of this structure
+ *             is used for ABI compatibility and must be set to sizeof(struct spdk_bdev_ext_io_opts).
  *
  * \return 0 on success. On success, the callback will always
  * be called (even if the request ultimately failed). Return
@@ -1595,7 +1794,7 @@ int spdk_bdev_reset(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
  * SPDK_BDEV_IO_STATUS_FAILED indicates any I/O was failed to abort for any reason
  * or no I/O which has bio_cb_arg as its callback context was found.
  *
- * \ingroup bdev_io_submit functions
+ * \ingroup bdev_io_submit_functions
  *
  * \param desc Block device descriptor.
  * \param ch The I/O channel which the I/Os to be aborted are associated with.
@@ -1710,6 +1909,64 @@ int spdk_bdev_nvme_io_passthru_md(struct spdk_bdev_desc *bdev_desc,
 				  spdk_bdev_io_completion_cb cb, void *cb_arg);
 
 /**
+ * Submit an NVMe I/O command to the bdev. This passes directly through
+ * the block layer to the device. Support for NVMe passthru is optional,
+ * indicated by calling spdk_bdev_io_type_supported().
+ *
+ * \ingroup bdev_io_submit_functions
+ *
+ * The namespace id (nsid) will be populated automatically.
+ *
+ * \param desc Block device descriptor
+ * \param ch I/O channel. Obtained by calling spdk_bdev_get_io_channel().
+ * \param cmd The raw NVMe command. Must be in the NVM command set.
+ * \param iov A scatter gather list of buffers for the command to use.
+ * \param iovcnt The number of elements in iov.
+ * \param nbytes The number of bytes to transfer. The total size of the buffers in iov must be greater than or equal to this size.
+ * \param md_buf Meta data buffer to written from.
+ * \param md_len md_buf size to transfer. md_buf must be greater than or equal to this size.
+ * \param cb Called when the request is complete.
+ * \param cb_arg Argument passed to cb.
+ *
+ * \return 0 on success. On success, the callback will always
+ * be called (even if the request ultimately failed). Return
+ * negated errno on failure, in which case the callback will not be called.
+ *   * -ENOMEM - spdk_bdev_io buffer cannot be allocated
+ *   * -EBADF - desc not open for writing
+ */
+int spdk_bdev_nvme_iov_passthru_md(struct spdk_bdev_desc *desc,
+				   struct spdk_io_channel *ch,
+				   const struct spdk_nvme_cmd *cmd,
+				   struct iovec *iov, int iovcnt,
+				   size_t nbytes, void *md_buf, size_t md_len,
+				   spdk_bdev_io_completion_cb cb, void *cb_arg);
+
+/**
+ * Submit a copy request to the block device.
+ *
+ * \ingroup bdev_io_submit_functions
+ *
+ * \param desc Block device descriptor.
+ * \param ch I/O channel. Obtained by calling spdk_bdev_get_io_channel().
+ * \param dst_offset_blocks The destination offset, in blocks, from the start of the block device.
+ * \param src_offset_blocks The source offset, in blocks, from the start of the block device.
+ * \param num_blocks The number of blocks to copy.
+ * \param cb Called when the request is complete.
+ * \param cb_arg Argument passed to cb.
+ *
+ * \return 0 on success. On success, the callback will always
+ * be called (even if the request ultimately failed). Return
+ * negated errno on failure, in which case the callback will not be called.
+ *   * -EINVAL - dst_offset_blocks, src_offset_blocks and/or num_blocks are out of range
+ *   * -ENOMEM - spdk_bdev_io buffer cannot be allocated
+ *   * -EBADF - desc not open for writing
+ *   * -ENOTSUP - copy operation is not supported
+ */
+int spdk_bdev_copy_blocks(struct spdk_bdev_desc *desc, struct spdk_io_channel *ch,
+			  uint64_t dst_offset_blocks, uint64_t src_offset_blocks,
+			  uint64_t num_blocks, spdk_bdev_io_completion_cb cb, void *cb_arg);
+
+/**
  * Free an I/O request. This should only be called after the completion callback
  * for the I/O has been called and notifies the bdev layer that memory may now
  * be released.
@@ -1771,10 +2028,11 @@ int spdk_bdev_queue_io_wait(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
  * \param bdev Block device.
  * \param ch I/O channel. Obtained by calling spdk_bdev_get_io_channel().
  * \param stat The per-channel statistics.
+ * \param reset_mode Mode to determine how I/O stat should be reset after obtaining it.
  *
  */
 void spdk_bdev_get_io_stat(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
-			   struct spdk_bdev_io_stat *stat);
+			   struct spdk_bdev_io_stat *stat, enum spdk_bdev_reset_stat_mode reset_mode);
 
 
 /**
@@ -1783,11 +2041,12 @@ void spdk_bdev_get_io_stat(struct spdk_bdev *bdev, struct spdk_io_channel *ch,
  *
  * \param bdev Block device to query.
  * \param stat Structure for aggregating collected statistics.  Passed as argument to cb.
+ * \param reset_mode Mode to determine how I/O stat should be reset after obtaining it.
  * \param cb Called when this operation completes.
  * \param cb_arg Argument passed to callback function.
  */
 void spdk_bdev_get_device_stat(struct spdk_bdev *bdev, struct spdk_bdev_io_stat *stat,
-			       spdk_bdev_get_device_stat_cb cb, void *cb_arg);
+			       enum spdk_bdev_reset_stat_mode reset_mode, spdk_bdev_get_device_stat_cb cb, void *cb_arg);
 
 /**
  * Get the status of bdev_io as an NVMe status code and command specific
@@ -1889,6 +2148,30 @@ void spdk_bdev_histogram_enable(struct spdk_bdev *bdev, spdk_bdev_histogram_stat
 				void *cb_arg, bool enable);
 
 /**
+ * Enable or disable collecting histogram data on a bdev. This differs from
+ * spdk_bdev_histogram_enable by allowing Optional structure with extended enable
+ * histogram options.
+ *
+ * \param bdev Block device.
+ * \param cb_fn Callback function to be called when histograms are enabled.
+ * \param cb_arg Argument to pass to cb_fn.
+ * \param enable Enable/disable flag
+ * \param opts Optional structure with extended enable histogram options. `size` member of this structure
+ *             is used for ABI compatibility and must be set to sizeof(struct spdk_bdev_enable_histogram_opts).
+ */
+void spdk_bdev_histogram_enable_ext(struct spdk_bdev *bdev, spdk_bdev_histogram_status_cb cb_fn,
+				    void *cb_arg, bool enable, struct spdk_bdev_enable_histogram_opts *opts);
+
+/**
+ * Initialize bdev enable histogram options structure.
+ *
+ * \param opts The structure to initialize.
+ * \param size The size of *opts.
+ */
+void
+spdk_bdev_enable_histogram_opts_init(struct spdk_bdev_enable_histogram_opts *opts, size_t size);
+
+/**
  * Get aggregated histogram data from a bdev. Callback provides merged histogram
  * for specified bdev.
  *
@@ -1900,6 +2183,18 @@ void spdk_bdev_histogram_enable(struct spdk_bdev *bdev, spdk_bdev_histogram_stat
 void spdk_bdev_histogram_get(struct spdk_bdev *bdev, struct spdk_histogram_data *histogram,
 			     spdk_bdev_histogram_data_cb cb_fn,
 			     void *cb_arg);
+
+/**
+ * Get histogram data of the specified channel for a bdev. The histogram passed to cb_fn
+ * is only valid during the execution of cb_fn. Referencing the histogram after cb_fn
+ * returns is not supported and yields undetermined behavior.
+ *
+ * \param ch IO channel of bdev.
+ * \param cb_fn Callback function to process the histogram of the channel.
+ * \param cb_arg Argument to pass to cb_fn.
+ */
+void spdk_bdev_channel_get_histogram(struct spdk_io_channel *ch, spdk_bdev_histogram_data_cb cb_fn,
+				     void *cb_arg);
 
 /**
  * Retrieves media events.  Can only be called from the context of
@@ -1933,6 +2228,77 @@ size_t spdk_bdev_get_media_events(struct spdk_bdev_desc *bdev_desc,
  */
 int spdk_bdev_get_memory_domains(struct spdk_bdev *bdev, struct spdk_memory_domain **domains,
 				 int array_size);
+
+/**
+ * \brief SPDK bdev channel iterator.
+ *
+ * This is a virtual representation of a bdev channel iterator.
+ */
+struct spdk_bdev_channel_iter;
+
+/**
+ * Called on the appropriate thread for each channel associated with the given bdev.
+ *
+ * \param i bdev channel iterator.
+ * \param bdev Block device.
+ * \param ch I/O channel.
+ * \param ctx context of the bdev channel iterator.
+ */
+typedef void (*spdk_bdev_for_each_channel_msg)(struct spdk_bdev_channel_iter *i,
+		struct spdk_bdev *bdev, struct spdk_io_channel *ch, void *ctx);
+
+/**
+ * spdk_bdev_for_each_channel() function's final callback with the given bdev.
+ *
+ * \param bdev Block device.
+ * \param ctx context of the bdev channel iterator.
+ * \param status 0 if it completed successfully, or negative errno if it failed.
+ */
+typedef void (*spdk_bdev_for_each_channel_done)(struct spdk_bdev *bdev, void *ctx, int status);
+
+/**
+ * Helper function to iterate the next channel for spdk_bdev_for_each_channel().
+ *
+ * \param i bdev channel iterator.
+ * \param status Status for the bdev channel iterator;
+ * for non 0 status remaining iterations are terminated.
+ */
+void spdk_bdev_for_each_channel_continue(struct spdk_bdev_channel_iter *i, int status);
+
+/**
+ * Call 'fn' on each channel associated with the given bdev.
+ *
+ * This happens asynchronously, so fn may be called after spdk_bdev_for_each_channel
+ * returns. 'fn' will be called for each channel serially, such that two calls
+ * to 'fn' will not overlap in time. After 'fn' has been called, call
+ * spdk_bdev_for_each_channel_continue() to continue iterating. Note that the
+ * spdk_bdev_for_each_channel_continue() function can be called asynchronously.
+ *
+ * \param bdev 'fn' will be called on each channel associated with this given bdev.
+ * \param fn Called on the appropriate thread for each channel associated with the given bdev.
+ * \param ctx Context for the caller.
+ * \param cpl Called on the thread that spdk_bdev_for_each_channel was initially called
+ * from when 'fn' has been called on each channel.
+ */
+void spdk_bdev_for_each_channel(struct spdk_bdev *bdev, spdk_bdev_for_each_channel_msg fn,
+				void *ctx, spdk_bdev_for_each_channel_done cpl);
+
+/**
+ * Get controller attributes for the bdev.
+ *
+ * \param bdev Block device to query.
+ * \return controller attributes for the bdev.
+ */
+union spdk_bdev_nvme_ctratt spdk_bdev_get_nvme_ctratt(struct spdk_bdev *bdev);
+
+/**
+ * Get NVMe namespace ID for a given bdev (only for NVMe bdevs).
+ *
+ * \param bdev Block device to query.
+ *
+ * \return Namespace ID or 0 if it's not available.
+ */
+uint32_t spdk_bdev_get_nvme_nsid(struct spdk_bdev *bdev);
 
 #ifdef __cplusplus
 }

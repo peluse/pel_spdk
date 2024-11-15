@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2018 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -455,8 +455,9 @@ rpc_bdev_nvme_send_cmd(struct spdk_jsonrpc_request *request,
 	return;
 
 invalid:
+	if (ctx != NULL) {
+		free_rpc_bdev_nvme_send_cmd_ctx(ctx);
+	}
 	spdk_jsonrpc_send_error_response(request, error_code, spdk_strerror(-ret));
-	free_rpc_bdev_nvme_send_cmd_ctx(ctx);
-	return;
 }
 SPDK_RPC_REGISTER("bdev_nvme_send_cmd", rpc_bdev_nvme_send_cmd, SPDK_RPC_RUNTIME)

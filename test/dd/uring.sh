@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2021 Intel Corporation
+#  All rights reserved.
+#
+
 testdir=$(readlink -f "$(dirname "$0")")
 rootdir=$(readlink -f "$testdir/../../")
 source "$testdir/common.sh"
@@ -65,7 +70,7 @@ uring_zram_copy() {
 
 	diff -q "$magic_file0" "$magic_file1"
 
-	# Copy cotents of uring bdev to malloc bdev
+	# Copy contents of uring bdev to malloc bdev
 	"${DD_APP[@]}" \
 		--ib="$ubdev" \
 		--ob="$mbdev" \

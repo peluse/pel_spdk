@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2015 Intel Corporation
+#  Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES.
+#  All rights reserved.
+#
 if [[ $(uname -s) == Darwin ]]; then
 	# SPDK is not supported on MacOS, but as a developer
 	# convenience we support running the check_format.sh
@@ -64,9 +68,14 @@ function array_contains_string() {
 rc=0
 
 function check_permissions() {
-	echo -n "Checking file permissions..."
+	local rc=0 files=()
 
-	local rc=0
+	mapfile -t files < <(git ls-files)
+	mapfile -t files < <(get_diffed_dups "${files[@]}")
+
+	((${#files[@]} > 0)) || return 0
+
+	echo -n "Checking file permissions..."
 
 	while read -r perm _res0 _res1 path; do
 		if [ ! -f "$path" ]; then
@@ -107,7 +116,7 @@ function check_permissions() {
 				;;
 		esac
 
-	done <<< "$(git grep -I --name-only --untracked -e . | git ls-files -s)"
+	done < <(git ls-files -s "${files[@]}")
 
 	if [ $rc -eq 0 ]; then
 		echo " OK"
@@ -121,13 +130,15 @@ function check_c_style() {
 
 	if hash astyle; then
 		echo -n "Checking coding style..."
-		if [ "$(astyle -V)" \< "Artistic Style Version 3" ]; then
-			echo -n " Your astyle version is too old so skipping coding style checks. Please update astyle to at least 3.0.1 version..."
+		version=$(astyle --version | awk '{print $NF}')
+		if lt "$version" 3.0.1 || gt "$version" 3.1; then
+			echo " Your astyle version is not compatible so skipping coding style checks. Please use astyle version between 3.0.1 and 3.1"
+			rc=1
 		else
 			rm -f astyle.log
 			touch astyle.log
 			# Exclude DPDK header files copied into our tree
-			git ls-files '*.[ch]' ':!:*/env_dpdk/*/*.h' \
+			git ls-files '*.[ch]' ':!:*/env_dpdk/*/*.h' ':!:include/linux/fuse_kernel.h' \
 				| xargs -P$(nproc) -n10 astyle --break-return-type --attach-return-type-decl \
 					--options=.astylerc >> astyle.log
 			git ls-files '*.cpp' '*.cc' '*.cxx' '*.hh' '*.hpp' \
@@ -159,7 +170,7 @@ function check_comment_style() {
 
 	git grep --line-number -e '\/[*][^ *-]' -- '*.[ch]' > comment.log || true
 	git grep --line-number -e '[^ ][*]\/' -- '*.[ch]' ':!lib/rte_vhost*/*' >> comment.log || true
-	git grep --line-number -e '^[*]' -- '*.[ch]' >> comment.log || true
+	git grep --line-number -e '^[*]' -- '*.[ch]' ':!include/linux/fuse_kernel.h' >> comment.log || true
 	git grep --line-number -e '\s\/\/' -- '*.[ch]' >> comment.log || true
 	git grep --line-number -e '^\/\/' -- '*.[ch]' >> comment.log || true
 
@@ -234,7 +245,7 @@ function check_cunit_style() {
 
 	echo -n "Checking for use of forbidden CUnit macros..."
 
-	git grep --line-number -w 'CU_ASSERT_FATAL' -- 'test/*' ':!test/spdk_cunit.h' > badcunit.log || true
+	git grep --line-number -w 'CU_ASSERT_FATAL' -- 'test/*' ':!include/spdk_internal/cunit.h' > badcunit.log || true
 	if [ -s badcunit.log ]; then
 		echo " Forbidden CU_ASSERT_FATAL usage detected - use SPDK_CU_ASSERT_FATAL instead"
 		cat badcunit.log
@@ -284,7 +295,7 @@ function check_posix_includes() {
 	return $rc
 }
 
-function check_naming_conventions() {
+check_function_conventions() {
 	local rc=0
 
 	echo -n "Checking for proper function naming conventions..."
@@ -296,9 +307,9 @@ function check_naming_conventions() {
 
 	# Build an array of all the modified C libraries.
 	mapfile -t changed_c_libs < <(git diff --name-only HEAD $commit_to_compare -- lib/**/*.c module/**/*.c | xargs -r dirname | sort | uniq)
-	# Matching groups are 1. qualifiers / return type. 2. function name 3. argument list / comments and stuff after that.
-	# Capture just the names of newly added (or modified) function definitions.
-	mapfile -t declared_symbols < <(git diff -U0 $commit_to_compare HEAD -- include/spdk*/*.h | sed -En 's/(^[+].*)(spdk[a-z,A-Z,0-9,_]*)(\(.*)/\2/p')
+	# Capture the names of all function declarations
+	mapfile -t declared_symbols < <(grep -Eh 'spdk_[a-zA-Z0-9_]*\(' include/spdk*/*.h \
+		| sed -En 's/.*(spdk[a-z,A-Z,0-9,_]*)\(.*/\1/p')
 
 	for c_lib in "${changed_c_libs[@]}"; do
 		lib_map_file="mk/spdk_blank.map"
@@ -357,6 +368,45 @@ function check_naming_conventions() {
 	return $rc
 }
 
+check_conventions_generic() {
+	local out decltype=$1 excludes=(${@:2})
+
+	# We only care about the types defined at the beginning of a line to allow stuff like nested
+	# structs.  Also, we need to drop any __attribute__ declarations.
+	out=$(git grep -E "^$decltype\s+\w+.*\{$" -- "include/spdk" "${excludes[@]}" \
+		| sed 's/__attribute__\s*(([[:alnum:]_, ()]*))\s*//g' \
+		| awk "!/$decltype\s+spdk_/ { \$(NF--)=\"\"; print }")
+
+	if [[ -n "$out" ]]; then
+		cat <<- WARN
+			Found $decltype declarations without the spdk_ prefix:
+
+			$out
+		WARN
+		return 1
+	fi
+}
+
+check_naming_conventions() {
+	check_function_conventions
+	# There are still some enums without the spdk_ prefix.  Once they're renamed, we can remove
+	# these excludes
+	check_conventions_generic 'enum' \
+		':!include/spdk/blob.h' \
+		':!include/spdk/ftl.h' \
+		':!include/spdk/idxd_spec.h' \
+		':!include/spdk/iscsi_spec.h' \
+		':!include/spdk/lvol.h' \
+		':!include/spdk/nvmf_fc_spec.h' \
+		':!include/spdk/vfio_user_spec.h'
+	# Same with structs
+	check_conventions_generic 'struct' \
+		':!include/spdk/ftl.h' \
+		':!include/spdk/idxd_spec.h' \
+		':!include/spdk/iscsi_spec.h' \
+		':!include/spdk/vfio_user_spec.h'
+}
+
 function check_include_style() {
 	local rc=0
 
@@ -374,6 +424,43 @@ function check_include_style() {
 	return $rc
 }
 
+function check_opts_structs() {
+	local IFS="|" out types=(
+		spdk_nvme_ns_cmd_ext_io_opts
+		spdk_dif_ctx_init_ext_opts
+	)
+
+	if out=$(git grep -InE "(\.|->)size[[:space:]]*=[[:space:]]*sizeof\(struct (${types[*]})\)"); then
+		cat <<- WARN
+			Found incorrect *ext_opts struct usage.  Use SPDK_SIZEOF() to calculate its size.
+
+			$out
+		WARN
+		return 1
+	fi
+}
+
+function check_attr_packed() {
+	local out
+
+	# For now, we only care about the packed attribute in selected files.  We only check those
+	# used by Timberland (see https://github.com/timberland-sig), as they're using msvc, which
+	# doesn't support the __attribute__ keyword.
+	if out=$(git grep -In '__attribute__((packed))' \
+		'include/spdk/nvme*.h' \
+		'include/spdk/sock.h' \
+		'include/spdk_internal/nvme*.h' \
+		'lib/nvme' 'lib/sock'); then
+		cat <<- WARN
+			Found forbidden __attribute__((packed)).  Try to pack the structures manually or
+			use #pragma pack instead.
+
+			$out
+		WARN
+		return 1
+	fi
+}
+
 function check_python_style() {
 	local rc=0
 
@@ -386,7 +473,7 @@ function check_python_style() {
 	if [ -n "${PEP8}" ]; then
 		echo -n "Checking Python style..."
 
-		PEP8_ARGS+=" --max-line-length=140"
+		PEP8_ARGS=" --max-line-length=140"
 
 		error=0
 		git ls-files '*.py' | xargs -P$(nproc) -n1 $PEP8 $PEP8_ARGS > pep8.log || error=1
@@ -405,26 +492,53 @@ function check_python_style() {
 	return $rc
 }
 
+function check_golang_style() {
+	local rc=0 out
+
+	if hash golangci-lint 2> /dev/null; then
+		echo -n "Checking Golang style..."
+		gofmtOut=$(gofmt -d . 2>&1)
+		golintOut=$(find "$rootdir/go" -name go.mod -execdir golangci-lint run \; 2>&1)
+		if [[ -n "$gofmtOut" ]] && [[ $gofmtOut == *"diff"* ]]; then
+			cat <<- WARN
+				Golang formatting errors detected:
+				echo "$gofmtOut"
+			WARN
+
+			return 1
+		elif [[ -n "$golintOut" ]]; then
+			cat <<- WARN
+				Golangci lint failed:
+				echo "$golintOut"
+			WARN
+
+			return 1
+		else
+			echo "OK"
+		fi
+	else
+		echo "You do not have golangci-lint installed, so Golang style will not be checked!"
+	fi
+	return 0
+}
+
 function get_bash_files() {
 	local sh shebang
 
 	mapfile -t sh < <(git ls-files '*.sh')
 	mapfile -t shebang < <(git grep -l '^#!.*bash')
 
-	printf '%s\n' "${sh[@]}" "${shebang[@]}" | sort -u
+	get_diffed_dups "${sh[@]}" "${shebang[@]}"
 }
 
 function check_bash_style() {
-	local rc=0
+	local rc=0 supported_shfmt_version=v3.8.0
 
 	# find compatible shfmt binary
-	shfmt_bins=$(compgen -c | grep '^shfmt' | uniq || true)
-	for bin in $shfmt_bins; do
+	shfmt_bins=($(compgen -c | grep '^shfmt' | uniq || true))
+	for bin in "${shfmt_bins[@]}"; do
 		shfmt_version=$("$bin" --version)
-		if [ $shfmt_version != "v3.1.0" ]; then
-			echo "$bin version $shfmt_version not used (only v3.1.0 is supported)"
-			echo "v3.1.0 can be installed using 'scripts/pkgdep.sh -d'"
-		else
+		if [[ $shfmt_version == "$supported_shfmt_version" ]]; then
 			shfmt=$bin
 			break
 		fi
@@ -447,43 +561,66 @@ function check_bash_style() {
 
 			diff=${output_dir:-$PWD}/$shfmt.patch
 
-			# Explicitly tell shfmt to not look for .editorconfig. .editorconfig is also not looked up
-			# in case any formatting arguments has been passed on its cmdline.
-			if ! SHFMT_NO_EDITORCONFIG=true "$shfmt" "${shfmt_cmdline[@]}" "${sh_files[@]}" > "$diff"; then
+			if ! "$shfmt" "${shfmt_cmdline[@]}" "${sh_files[@]}" > "$diff"; then
 				# In case shfmt detects an actual syntax error it will write out a proper message on
 				# its stderr, hence the diff file should remain empty.
-				if [[ -s $diff ]]; then
-					diff_out=$(< "$diff")
-				fi
-
-				cat <<- ERROR_SHFMT
-
-					* Errors in style formatting have been detected.
-					${diff_out:+* Please, review the generated patch at $diff
-
-					# _START_OF_THE_DIFF
-
-					${diff_out:-ERROR}
-
-					# _END_OF_THE_DIFF
-					}
-
-				ERROR_SHFMT
 				rc=1
+				if [[ -s $diff ]]; then
+					if patch --merge -p0 < "$diff"; then
+						diff_out=$(git diff)
+
+						if [[ -n $diff_out ]]; then
+							cat <<- ERROR_SHFMT
+
+								* Errors in style formatting have been detected.
+								  Please, review the generated patch at $diff
+
+								# _START_OF_THE_DIFF
+
+								$diff_out
+
+								# _END_OF_THE_DIFF
+
+							ERROR_SHFMT
+						else
+							# Empty diff? This likely means that we reverted to a clean state
+							printf '* Patch reverted, please review your changes and %s\n' "$diff"
+						fi
+					else
+						printf '* Failed to apply %s\n' "$diff"
+
+					fi
+				fi
 			else
 				rm -f "$diff"
 				printf ' OK\n'
 			fi
 		fi
 	else
-		echo "Supported version of shfmt not detected, Bash style formatting check is skipped"
+		cat <<- MSG
+			Supported version of shfmt not detected${shfmt_bins[*]:+ (only ${shfmt_bins[*]} is available)}.  Bash style
+			formatting check is skipped.  shfmt-$supported_shfmt_version can be installed using 'scripts/pkgdep.sh -d'.
+		MSG
+	fi
+
+	# Cleanup potential .orig files that shfmt creates
+	local orig_f
+
+	mapfile -t orig_f < <(git diff --name-only)
+	orig_f=("${orig_f[@]/%/.orig}")
+
+	if ((${#orig_f[@]} > 0)); then
+		git clean -f "${orig_f[@]}"
 	fi
 
 	return $rc
 }
 
 function check_bash_static_analysis() {
-	local rc=0
+	local rc=0 files=()
+
+	mapfile -t files < <(get_bash_files)
+	((${#files[@]} > 0)) || return 0
 
 	if hash shellcheck 2> /dev/null; then
 		echo -n "Checking Bash static analysis with shellcheck..."
@@ -537,7 +674,7 @@ SC2119,SC2120,SC2128,SC2148,SC2153,SC2154,SC2164,SC2174,SC2178,SC2001,SC2206,SC2
 			echo "shellcheck $shellcheck_v detected, recommended >= 0.4.0."
 		fi
 
-		get_bash_files | xargs -P$(nproc) -n1 shellcheck $SHCH_ARGS &> shellcheck.log
+		printf '%s\n' "${files[@]}" | xargs -P$(nproc) -n1 shellcheck $SHCH_ARGS &> shellcheck.log
 		if [[ -s shellcheck.log ]]; then
 			echo " Bash shellcheck errors detected!"
 
@@ -611,7 +748,7 @@ function check_json_rpc() {
 			echo "Missing JSON-RPC documentation for ${rpc}"
 			rc=1
 		fi
-	done < <(git grep -h -E "^SPDK_RPC_REGISTER\(" ':!test/*' ':!examples/nvme/hotplug/*')
+	done < <(git grep -h -E "^SPDK_RPC_REGISTER\(" ':!test/*' ':!examples/*')
 
 	if [ $rc -eq 0 ]; then
 		echo " OK"
@@ -658,6 +795,120 @@ function check_rpc_args() {
 	return $rc
 }
 
+function get_files_for_lic() {
+	local f_shebang="" f_suffix=() f_type=() f_all=() exceptions=""
+
+	f_shebang+="bash|"
+	f_shebang+="make|"
+	f_shebang+="perl|"
+	f_shebang+="python|"
+	f_shebang+="sh"
+
+	f_suffix+=("*.c")
+	f_suffix+=("*.cpp")
+	f_suffix+=("*.h")
+	f_suffix+=("*.go")
+	f_suffix+=("*.mk")
+	f_suffix+=("*.pl")
+	f_suffix+=("*.py")
+	f_suffix+=("*.sh")
+	f_suffix+=("*.yaml")
+
+	f_type+=("*Dockerfile")
+	f_type+=("*Makefile")
+
+	# Exclude files that may match the above types but should not
+	# fall under SPDX check.
+	exceptions+="include/linux|"
+	exceptions+="include/spdk/queue_extras.h|"
+	exceptions+="lib/mlx5/mlx5_ifc.h"
+
+	mapfile -t f_all < <(
+		git ls-files "${f_suffix[@]}" "${f_type[@]}"
+		git grep -lE "^#!.*($f_shebang)"
+	)
+
+	printf '%s\n' "${f_all[@]}" | sort -u | grep -vE "$exceptions"
+}
+
+function check_spdx_lic() {
+	local files_missing_license_header=() hint=()
+	local rc=0
+
+	hint+=("SPDX-License-Identifier: BSD-3-Clause")
+	hint+=("All rights reserved.")
+
+	printf 'Checking SPDX-license...'
+
+	mapfile -t files_missing_license_header < <(
+		grep -LE "SPDX-License-Identifier:.+" $(get_files_for_lic)
+	)
+
+	if ((${#files_missing_license_header[@]} > 0)); then
+		printf '\nFollowing files are missing SPDX-license header:\n'
+		printf '  @%s\n' "${files_missing_license_header[@]}"
+		printf '\nExample:\n'
+		printf '  #  %s\n' "${hint[@]}"
+		return 1
+	fi
+
+	printf 'OK\n'
+}
+
+function get_diffed_files() {
+	# Get files where changes are meant to be committed
+	git diff --name-only HEAD HEAD~1
+	# Get files from staging
+	git diff --name-only --cached HEAD
+	git diff --name-only HEAD
+}
+
+function get_diffed_dups() {
+	local files=("$@") diff=() _diff=()
+
+	# Sort and get rid of duplicates from the main list
+	mapfile -t files < <(printf '%s\n' "${files[@]}" | sort -u)
+	# Get staged|committed files
+	mapfile -t diff < <(get_diffed_files | sort -u)
+
+	if [[ ! -v CHECK_FORMAT_ONLY_DIFF ]]; then
+		# Just return the main list
+		printf '%s\n' "${files[@]}"
+		return 0
+	fi
+
+	if ((${#diff[@]} > 0)); then
+		# Check diff'ed files against the main list to see if they are a subset
+		# of it. If yes, then we return the duplicates which are the files that
+		# should be committed, modified.
+		mapfile -t _diff < <(
+			printf '%s\n' "${diff[@]}" "${files[@]}" | sort | uniq -d
+		)
+		if ((${#_diff[@]} > 0)); then
+			printf '%s\n' "${_diff[@]}"
+			return 0
+		fi
+	fi
+}
+
+function check_extern_c() {
+	local files_missing_extern_c=()
+
+	printf 'Checking extern "C"... '
+
+	mapfile -t files_missing_extern_c < <(
+		grep -LE "extern \"C\"" $(git ls-files -- ./include/spdk/*.h)
+	)
+
+	if ((${#files_missing_extern_c[@]} > 0)); then
+		printf '\nFollowing header files are missing extern C:\n'
+		printf '  %s\n' "${files_missing_extern_c[@]}"
+		return 1
+	fi
+
+	printf 'OK\n'
+}
+
 rc=0
 
 check_permissions || rc=1
@@ -681,11 +932,16 @@ check_eof || rc=1
 check_posix_includes || rc=1
 check_naming_conventions || rc=1
 check_include_style || rc=1
+check_opts_structs || rc=1
+check_attr_packed || rc=1
 check_python_style || rc=1
 check_bash_style || rc=1
 check_bash_static_analysis || rc=1
 check_changelog || rc=1
 check_json_rpc || rc=1
 check_rpc_args || rc=1
+check_spdx_lic || rc=1
+check_golang_style || rc=1
+check_extern_c || rc=1
 
 exit $rc

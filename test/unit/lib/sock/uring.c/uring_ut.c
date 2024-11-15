@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2019 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -8,7 +8,7 @@
 
 #include "spdk_internal/mock.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "common/lib/test_env.c"
 #include "sock/uring/uring.c"
@@ -21,14 +21,16 @@ DEFINE_STUB(spdk_sock_map_lookup, int, (struct spdk_sock_map *map, int placement
 DEFINE_STUB(spdk_sock_map_find_free, int, (struct spdk_sock_map *map), -1);
 DEFINE_STUB_V(spdk_sock_map_cleanup, (struct spdk_sock_map *map));
 
-DEFINE_STUB_V(spdk_net_impl_register, (struct spdk_net_impl *impl, int priority));
+DEFINE_STUB_V(spdk_net_impl_register, (struct spdk_net_impl *impl));
+DEFINE_STUB(spdk_sock_set_default_impl, int, (const char *impl_name), 0);
 DEFINE_STUB(spdk_sock_close, int, (struct spdk_sock **s), 0);
-DEFINE_STUB(__io_uring_get_cqe, int, (struct io_uring *ring, struct io_uring_cqe **cqe_ptr,
-				      unsigned submit,
-				      unsigned wait_nr, sigset_t *sigmask), 0);
 DEFINE_STUB(io_uring_submit, int, (struct io_uring *ring), 0);
 DEFINE_STUB(io_uring_queue_init, int, (unsigned entries, struct io_uring *ring, unsigned flags), 0);
 DEFINE_STUB_V(io_uring_queue_exit, (struct io_uring *ring));
+DEFINE_STUB(spdk_sock_group_provide_buf, int, (struct spdk_sock_group *group, void *buf,
+		size_t len, void *ctx), 0);
+DEFINE_STUB(spdk_sock_group_get_buf, size_t, (struct spdk_sock_group *group, void **buf,
+		void **ctx), 0);
 
 static void
 _req_cb(void *cb_arg, int len)
@@ -79,8 +81,8 @@ flush_client(void)
 	spdk_sock_request_queue(sock, req1);
 	MOCK_SET(sendmsg, 192);
 	cb_arg1 = false;
-	rc = _sock_flush_client(sock);
-	CU_ASSERT(rc == 0);
+	rc = uring_sock_flush(sock);
+	CU_ASSERT(rc == 192);
 	CU_ASSERT(cb_arg1 == true);
 	CU_ASSERT(TAILQ_EMPTY(&sock->queued_reqs));
 
@@ -90,8 +92,8 @@ flush_client(void)
 	MOCK_SET(sendmsg, 256);
 	cb_arg1 = false;
 	cb_arg2 = false;
-	rc = _sock_flush_client(sock);
-	CU_ASSERT(rc == 0);
+	rc = uring_sock_flush(sock);
+	CU_ASSERT(rc == 256);
 	CU_ASSERT(cb_arg1 == true);
 	CU_ASSERT(cb_arg2 == true);
 	CU_ASSERT(TAILQ_EMPTY(&sock->queued_reqs));
@@ -102,8 +104,8 @@ flush_client(void)
 	MOCK_SET(sendmsg, 192);
 	cb_arg1 = false;
 	cb_arg2 = false;
-	rc = _sock_flush_client(sock);
-	CU_ASSERT(rc == 0);
+	rc = uring_sock_flush(sock);
+	CU_ASSERT(rc == 192);
 	CU_ASSERT(cb_arg1 == true);
 	CU_ASSERT(cb_arg2 == false);
 	CU_ASSERT(TAILQ_FIRST(&sock->queued_reqs) == req2);
@@ -114,24 +116,24 @@ flush_client(void)
 	spdk_sock_request_queue(sock, req1);
 	MOCK_SET(sendmsg, 10);
 	cb_arg1 = false;
-	rc = _sock_flush_client(sock);
-	CU_ASSERT(rc == 0);
+	rc = uring_sock_flush(sock);
+	CU_ASSERT(rc == 10);
 	CU_ASSERT(cb_arg1 == false);
 	CU_ASSERT(TAILQ_FIRST(&sock->queued_reqs) == req1);
 
 	/* Do a second flush that partial sends again. */
 	MOCK_SET(sendmsg, 52);
 	cb_arg1 = false;
-	rc = _sock_flush_client(sock);
-	CU_ASSERT(rc == 0);
+	rc = uring_sock_flush(sock);
+	CU_ASSERT(rc == 52);
 	CU_ASSERT(cb_arg1 == false);
 	CU_ASSERT(TAILQ_FIRST(&sock->queued_reqs) == req1);
 
 	/* Flush the rest of the data */
 	MOCK_SET(sendmsg, 130);
 	cb_arg1 = false;
-	rc = _sock_flush_client(sock);
-	CU_ASSERT(rc == 0);
+	rc = uring_sock_flush(sock);
+	CU_ASSERT(rc == 130);
 	CU_ASSERT(cb_arg1 == true);
 	CU_ASSERT(TAILQ_EMPTY(&sock->queued_reqs));
 
@@ -232,7 +234,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("uring", NULL, NULL);
@@ -241,11 +242,9 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, flush_client);
 	CU_ADD_TEST(suite, flush_server);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
 
-	CU_basic_run_tests();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 
-	num_failures = CU_get_number_of_failures();
 	CU_cleanup_registry();
 
 	return num_failures;

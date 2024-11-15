@@ -10,7 +10,15 @@ include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
 all:
 	(cd $(SPDK_ROOT_DIR)/xnvme && \
-		meson setup builddir -Dwith-spdk=false -Dwith-fio=false -Dshared_library=false && \
+		export PKG_CONFIG_PATH=$$PKG_CONFIG_PATH:/usr/lib/pkgconfig:/usr/lib64/pkgconfig && \
+		meson setup builddir \
+		-Dwith-libaio=enabled \
+		-Dwith-liburing=enabled \
+		-Dwith-libvfn=disabled \
+		-Dwith-spdk=disabled \
+		-Dexamples=false \
+		-Dtests=false \
+		-Dtools=false && \
 		meson compile -C builddir && \
 		cd -)
 

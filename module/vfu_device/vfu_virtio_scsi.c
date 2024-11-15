@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2022 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -112,10 +112,10 @@ vfu_virtio_scsi_vring_poll(void *ctx)
 
 		if (vq->packed.packed_ring) {
 			/* packed vring */
-			count += vfu_virito_dev_process_packed_ring(dev, vq);
+			count += vfu_virtio_dev_process_packed_ring(dev, vq);
 		} else {
 			/* split vring */
-			count += vfu_virito_dev_process_split_ring(dev, vq);
+			count += vfu_virtio_dev_process_split_ring(dev, vq);
 		}
 	}
 
@@ -517,7 +517,7 @@ virtio_scsi_update_config(struct virtio_scsi_endpoint *scsi_endpoint)
 
 	scsi_cfg->num_queues = scsi_endpoint->virtio.num_queues;
 	/*  -2 for REQ and RESP and -1 for region boundary splitting */
-	scsi_cfg->seg_max = spdk_min(VIRTIO_DEV_MAX_IOVS - 2 - 1, BDEV_IO_NUM_CHILD_IOV - 2 - 1);
+	scsi_cfg->seg_max = spdk_min(VIRTIO_DEV_MAX_IOVS - 2 - 1, SPDK_BDEV_IO_NUM_CHILD_IOV - 2 - 1);
 	/* we can set `max_sectors` and `cmd_per_lun` based on bdevs */
 	scsi_cfg->max_sectors = 131072;
 	scsi_cfg->cmd_per_lun = scsi_endpoint->virtio.qsize;

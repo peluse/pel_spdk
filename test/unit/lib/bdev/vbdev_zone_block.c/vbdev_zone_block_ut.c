@@ -1,10 +1,11 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2019 Intel Corporation.
  *   All rights reserved.
+ *   Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "spdk/stdinc.h"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "spdk/env.h"
 #include "spdk_internal/mock.h"
 #include "thread/thread_internal.h"
@@ -184,18 +185,23 @@ int
 spdk_bdev_module_claim_bdev(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 			    struct spdk_bdev_module *module)
 {
-	if (bdev->internal.claim_module != NULL) {
+	if (bdev->internal.claim_type != SPDK_BDEV_CLAIM_NONE) {
+		CU_ASSERT(bdev->internal.claim.v1.module != NULL);
 		return -1;
 	}
-	bdev->internal.claim_module = module;
+	CU_ASSERT(bdev->internal.claim.v1.module == NULL);
+	bdev->internal.claim_type = SPDK_BDEV_CLAIM_EXCL_WRITE;
+	bdev->internal.claim.v1.module = module;
 	return 0;
 }
 
 void
 spdk_bdev_module_release_bdev(struct spdk_bdev *bdev)
 {
-	CU_ASSERT(bdev->internal.claim_module != NULL);
-	bdev->internal.claim_module = NULL;
+	CU_ASSERT(bdev->internal.claim_type == SPDK_BDEV_CLAIM_EXCL_WRITE);
+	CU_ASSERT(bdev->internal.claim.v1.module != NULL);
+	bdev->internal.claim_type = SPDK_BDEV_CLAIM_NONE;
+	bdev->internal.claim.v1.module = NULL;
 }
 
 void
@@ -991,7 +997,7 @@ test_reset_zone(void)
 	zone_id = num_zones * bdev->bdev.zone_size;
 	send_reset_zone(bdev, ch, zone_id, output_index, false);
 
-	/* Send reset to already resetted zone */
+	/* Send reset to already reset zone */
 	zone_id = 0;
 	send_reset_zone(bdev, ch, zone_id, output_index, true);
 	send_zone_info(bdev, ch, zone_id, zone_id, SPDK_BDEV_ZONE_STATE_EMPTY, output_index, true);
@@ -1465,7 +1471,6 @@ main(int argc, char **argv)
 	CU_pSuite       suite = NULL;
 	unsigned int    num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("zone_block", NULL, NULL);
@@ -1485,10 +1490,8 @@ main(int argc, char **argv)
 	g_thread = spdk_thread_create("test", NULL);
 	spdk_set_thread(g_thread);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
 	set_test_opts();
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 
 	spdk_thread_exit(g_thread);
 	while (!spdk_thread_is_exited(g_thread)) {

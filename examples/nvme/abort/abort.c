@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2020 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -13,6 +13,7 @@
 #include "spdk/util.h"
 #include "spdk/likely.h"
 
+#define ABORT_GETOPT_STRING "a:c:i:l:o:q:r:s:t:w:GM:T:"
 struct ctrlr_entry {
 	struct spdk_nvme_ctrlr		*ctrlr;
 	enum spdk_nvme_transport_type	trtype;
@@ -70,6 +71,7 @@ struct worker_thread {
 	TAILQ_HEAD(, ctrlr_worker_ctx)	ctrlr_ctx;
 	TAILQ_ENTRY(worker_thread)	link;
 	unsigned			lcore;
+	int				status;
 };
 
 static const char *g_workload_type = "read";
@@ -95,8 +97,15 @@ static int g_shm_id = -1;
 static bool g_no_pci;
 static bool g_warn;
 static bool g_mix_specified;
+static bool g_no_hugepages;
 
 static const char *g_core_mask;
+
+static const struct option g_abort_cmdline_opts[] = {
+#define ABORT_NO_HUGE        257
+	{"no-huge",			no_argument,	NULL, ABORT_NO_HUGE},
+	{0, 0, 0, 0}
+};
 
 struct trid_entry {
 	struct spdk_nvme_transport_id	trid;
@@ -422,6 +431,7 @@ work_fn(void *arg)
 	struct spdk_nvme_io_qpair_opts opts;
 	uint64_t tsc_end;
 	uint32_t unfinished_ctx;
+	int rc = 0;
 
 	/* Allocate queue pair for each namespace. */
 	TAILQ_FOREACH(ns_ctx, &worker->ns_ctx, link) {
@@ -435,7 +445,8 @@ work_fn(void *arg)
 		ns_ctx->qpair = spdk_nvme_ctrlr_alloc_io_qpair(ns_entry->ctrlr, &opts, sizeof(opts));
 		if (ns_ctx->qpair == NULL) {
 			fprintf(stderr, "spdk_nvme_ctrlr_alloc_io_qpair failed\n");
-			return 1;
+			worker->status = -ENOMEM;
+			goto out;
 		}
 	}
 
@@ -448,15 +459,27 @@ work_fn(void *arg)
 
 	while (1) {
 		TAILQ_FOREACH(ns_ctx, &worker->ns_ctx, link) {
-			spdk_nvme_qpair_process_completions(ns_ctx->qpair, 0);
+			rc = spdk_nvme_qpair_process_completions(ns_ctx->qpair, 0);
+			if (rc < 0) {
+				fprintf(stderr, "spdk_nvme_qpair_process_completions returned "
+					"%d\n", rc);
+				worker->status = rc;
+				goto out;
+			}
 		}
 
 		if (worker->lcore == g_main_core) {
 			TAILQ_FOREACH(ctrlr_ctx, &worker->ctrlr_ctx, link) {
 				/* Hold mutex to guard ctrlr_ctx->current_queue_depth. */
 				pthread_mutex_lock(&ctrlr_ctx->mutex);
-				spdk_nvme_ctrlr_process_admin_completions(ctrlr_ctx->ctrlr);
+				rc = spdk_nvme_ctrlr_process_admin_completions(ctrlr_ctx->ctrlr);
 				pthread_mutex_unlock(&ctrlr_ctx->mutex);
+				if (rc < 0) {
+					fprintf(stderr, "spdk_nvme_ctrlr_process_admin_completions "
+						"returned %d\n", rc);
+					worker->status = rc;
+					goto out;
+				}
 			}
 		}
 
@@ -473,12 +496,14 @@ work_fn(void *arg)
 				ns_ctx->is_draining = true;
 			}
 			if (ns_ctx->current_queue_depth > 0) {
-				spdk_nvme_qpair_process_completions(ns_ctx->qpair, 0);
-				if (ns_ctx->current_queue_depth == 0) {
-					spdk_nvme_ctrlr_free_io_qpair(ns_ctx->qpair);
-				} else {
-					unfinished_ctx++;
+				rc = spdk_nvme_qpair_process_completions(ns_ctx->qpair, 0);
+				if (rc < 0) {
+					fprintf(stderr, "spdk_nvme_qpair_process_completions "
+						"returned %d\n", rc);
+					worker->status = rc;
+					goto out;
 				}
+				unfinished_ctx++;
 			}
 		}
 	} while (unfinished_ctx > 0);
@@ -490,17 +515,27 @@ work_fn(void *arg)
 			TAILQ_FOREACH(ctrlr_ctx, &worker->ctrlr_ctx, link) {
 				pthread_mutex_lock(&ctrlr_ctx->mutex);
 				if (ctrlr_ctx->current_queue_depth > 0) {
-					spdk_nvme_ctrlr_process_admin_completions(ctrlr_ctx->ctrlr);
-					if (ctrlr_ctx->current_queue_depth > 0) {
-						unfinished_ctx++;
-					}
+					rc = spdk_nvme_ctrlr_process_admin_completions(ctrlr_ctx->ctrlr);
+					unfinished_ctx++;
 				}
 				pthread_mutex_unlock(&ctrlr_ctx->mutex);
+				if (rc < 0) {
+					fprintf(stderr, "spdk_nvme_ctrlr_process_admin_completions "
+						"returned %d\n", rc);
+					worker->status = rc;
+					goto out;
+				}
 			}
 		} while (unfinished_ctx > 0);
 	}
+out:
+	TAILQ_FOREACH(ns_ctx, &worker->ns_ctx, link) {
+		/* Make sure we don't submit any IOs at this point */
+		ns_ctx->is_draining = true;
+		spdk_nvme_ctrlr_free_io_qpair(ns_ctx->qpair);
+	}
 
-	return 0;
+	return worker->status != 0;
 }
 
 static void
@@ -530,6 +565,7 @@ usage(char *program_name)
 	printf("\t[-s DPDK huge memory size in MB.]\n");
 	printf("\t[-i shared memory group ID]\n");
 	printf("\t[-a abort interval.]\n");
+	printf("\t[--no-huge SPDK is run without hugepages\n");
 	printf("\t");
 	spdk_log_usage(stdout, "-T");
 #ifdef DEBUG
@@ -613,11 +649,12 @@ add_trid(const char *trid_str)
 static int
 parse_args(int argc, char **argv)
 {
-	int op;
+	int op, opt_index;
 	long int val;
 	int rc;
 
-	while ((op = getopt(argc, argv, "a:c:i:l:o:q:r:s:t:w:GM:T:")) != -1) {
+	while ((op = getopt_long(argc, argv, ABORT_GETOPT_STRING, g_abort_cmdline_opts,
+				 &opt_index)) != -1) {
 		switch (op) {
 		case 'a':
 		case 'i':
@@ -707,6 +744,9 @@ parse_args(int argc, char **argv)
 				fprintf(stderr, "Unrecognized log level: %s\n", optarg);
 				return 1;
 			}
+			break;
+		case ABORT_NO_HUGE:
+			g_no_hugepages = true;
 			break;
 		default:
 			usage(argv[0]);
@@ -825,7 +865,7 @@ unregister_workers(void)
 			printf("CTRLR: %s abort submitted %" PRIu64 ", failed to submit %" PRIu64 "\n",
 			       ctrlr_ctx->entry->name, ctrlr_ctx->abort_submitted,
 			       ctrlr_ctx->abort_submit_failed);
-			printf("\t success %" PRIu64 ", unsuccess %" PRIu64 ", failed %" PRIu64 "\n",
+			printf("\t success %" PRIu64 ", unsuccessful %" PRIu64 ", failed %" PRIu64 "\n",
 			       ctrlr_ctx->successful_abort, ctrlr_ctx->unsuccessful_abort,
 			       ctrlr_ctx->abort_failed);
 			free(ctrlr_ctx);
@@ -846,6 +886,9 @@ probe_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	 * commands other than the aborts. */
 	min_aq_size = spdk_divide_round_up(g_queue_depth, g_abort_interval) + 8;
 	opts->admin_queue_size = spdk_max(opts->admin_queue_size, min_aq_size);
+
+	/* Avoid possible nvme_qpair_abort_queued_reqs_with_cbarg ERROR when IO queue size is 128. */
+	opts->disable_error_logging = true;
 
 	return true;
 }
@@ -1032,6 +1075,7 @@ main(int argc, char **argv)
 		return rc;
 	}
 
+	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
 	opts.name = "abort";
 	opts.shm_id = g_shm_id;
@@ -1044,6 +1088,9 @@ main(int argc, char **argv)
 	}
 	if (g_no_pci) {
 		opts.no_pci = g_no_pci;
+	}
+	if (g_no_hugepages) {
+		opts.no_huge = true;
 	}
 	if (spdk_env_init(&opts) < 0) {
 		fprintf(stderr, "Unable to initialize SPDK env\n");
@@ -1101,6 +1148,13 @@ main(int argc, char **argv)
 	rc = work_fn(main_worker);
 
 	spdk_env_thread_wait_all();
+
+	TAILQ_FOREACH(worker, &g_workers, link) {
+		if (worker->status != 0) {
+			rc = 1;
+			break;
+		}
+	}
 
 cleanup:
 	unregister_trids();

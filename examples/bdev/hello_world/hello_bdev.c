@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2018 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -286,6 +286,7 @@ main(int argc, char **argv)
 	/* Set default values in opts structure. */
 	spdk_app_opts_init(&opts, sizeof(opts));
 	opts.name = "hello_bdev";
+	opts.rpc_addr = NULL;
 
 	/*
 	 * Parse built-in SPDK command line parameters as well

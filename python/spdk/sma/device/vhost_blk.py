@@ -1,3 +1,7 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation.
+#  All rights reserved.
+
 import logging
 import os
 import uuid
@@ -16,7 +20,7 @@ from .device import DeviceException, DeviceManager
 
 class VhostBlkDeviceManager(DeviceManager):
     def __init__(self, client):
-        super().__init__('vhost_blk', 'virtio_blk', client)
+        super().__init__('vhost_blk', 'virtio_blk', client, allow_delete_volumes=True)
 
     def init(self, config):
         self._buses = config.get('buses', [])
@@ -219,4 +223,6 @@ class VhostBlkDeviceManager(DeviceManager):
                                   'Failed to set QoS')
 
     def get_qos_capabilities(self, request):
-        return qos.get_bdev_qos_capabilities()
+        bdev_caps = qos.get_bdev_qos_capabilities().max_volume_caps
+        return sma_pb2.GetQosCapabilitiesResponse(max_volume_caps=bdev_caps,
+                                                  max_device_caps=bdev_caps)

@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -7,7 +7,7 @@
 
 #include "spdk/endian.h"
 #include "spdk/scsi.h"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "CUnit/Basic.h"
 
@@ -121,6 +121,21 @@ DEFINE_STUB(spdk_scsi_lun_id_fmt_to_int, int, (uint64_t lun_fmt), 0);
 DEFINE_STUB(spdk_scsi_lun_get_dif_ctx, bool,
 	    (struct spdk_scsi_lun *lun, struct spdk_scsi_task *task,
 	     struct spdk_dif_ctx *dif_ctx), false);
+
+static void
+alloc_mock_mobj(struct spdk_mobj *mobj, int len)
+{
+	mobj->buf = calloc(1, SPDK_BDEV_BUF_SIZE_WITH_MD(len));
+	SPDK_CU_ASSERT_FATAL(mobj->buf != NULL);
+
+	g_iscsi.pdu_immediate_data_pool = (struct spdk_mempool *)100;
+	g_iscsi.pdu_data_out_pool = (struct spdk_mempool *)200;
+	if (len == SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH) {
+		mobj->mp = g_iscsi.pdu_data_out_pool;
+	} else {
+		mobj->mp = g_iscsi.pdu_immediate_data_pool;
+	}
+}
 
 static void
 op_login_check_target_test(void)
@@ -370,6 +385,7 @@ underflow_for_read_transfer_test(void)
 	iscsi_task_set_pdu(&task, pdu);
 	task.parent = NULL;
 
+	task.scsi.iov.iov_base = (void *)0xF0000000;
 	task.scsi.iovs = &task.scsi.iov;
 	task.scsi.iovcnt = 1;
 	task.scsi.length = 512;
@@ -500,6 +516,7 @@ underflow_for_request_sense_test(void)
 	iscsi_task_set_pdu(&task, pdu1);
 	task.parent = NULL;
 
+	task.scsi.iov.iov_base = (void *)0xF000000;
 	task.scsi.iovs = &task.scsi.iov;
 	task.scsi.iovcnt = 1;
 	task.scsi.length = 512;
@@ -591,6 +608,7 @@ underflow_for_check_condition_test(void)
 	iscsi_task_set_pdu(&task, pdu);
 	task.parent = NULL;
 
+	task.scsi.iov.iov_base = (void *)0xF0000000;
 	task.scsi.iovs = &task.scsi.iov;
 	task.scsi.iovcnt = 1;
 	task.scsi.length = 512;
@@ -1217,6 +1235,7 @@ build_iovs_with_md_test(void)
 	uint8_t *data;
 	uint32_t mapped_length = 0;
 	int rc;
+	struct spdk_dif_ctx_init_ext_opts dif_opts;
 
 	conn.header_digest = true;
 	conn.data_digest = true;
@@ -1230,8 +1249,10 @@ build_iovs_with_md_test(void)
 	pdu.bhs.total_ahs_len = 0;
 	pdu.bhs.opcode = ISCSI_OP_SCSI;
 
+	dif_opts.size = SPDK_SIZEOF(&dif_opts, dif_pi_format);
+	dif_opts.dif_pi_format = SPDK_DIF_PI_FORMAT_16;
 	rc = spdk_dif_ctx_init(&pdu.dif_ctx, 4096 + 128, 128, true, false, SPDK_DIF_TYPE1,
-			       0, 0, 0, 0, 0, 0);
+			       0, 0, 0, 0, 0, 0, &dif_opts);
 	CU_ASSERT(rc == 0);
 
 	pdu.dif_insert_or_strip = true;
@@ -2037,11 +2058,8 @@ pdu_payload_read_test(void)
 
 	g_iscsi.FirstBurstLength = SPDK_ISCSI_FIRST_BURST_LENGTH;
 
-	mobj1.buf = calloc(1, SPDK_BDEV_BUF_SIZE_WITH_MD(SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH));
-	SPDK_CU_ASSERT_FATAL(mobj1.buf != NULL);
-
-	mobj2.buf = calloc(1, SPDK_BDEV_BUF_SIZE_WITH_MD(SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH));
-	SPDK_CU_ASSERT_FATAL(mobj2.buf != NULL);
+	alloc_mock_mobj(&mobj1, SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH);
+	alloc_mock_mobj(&mobj2, SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH);
 
 	MOCK_SET(spdk_mempool_get, &mobj1);
 
@@ -2212,14 +2230,9 @@ data_out_pdu_sequence_test(void)
 
 	TAILQ_INSERT_TAIL(&dev.luns, &lun, tailq);
 
-	mobj1.buf = calloc(1, SPDK_BDEV_BUF_SIZE_WITH_MD(SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH));
-	SPDK_CU_ASSERT_FATAL(mobj1.buf != NULL);
-
-	mobj2.buf = calloc(1, SPDK_BDEV_BUF_SIZE_WITH_MD(SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH));
-	SPDK_CU_ASSERT_FATAL(mobj2.buf != NULL);
-
-	mobj3.buf = calloc(1, SPDK_BDEV_BUF_SIZE_WITH_MD(SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH));
-	SPDK_CU_ASSERT_FATAL(mobj3.buf != NULL);
+	alloc_mock_mobj(&mobj1, SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH);
+	alloc_mock_mobj(&mobj2, SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH);
+	alloc_mock_mobj(&mobj3, SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH);
 
 	/* Test scenario is as follows.
 	 *
@@ -2382,8 +2395,7 @@ immediate_data_and_data_out_pdu_sequence_test(void)
 
 	TAILQ_INSERT_TAIL(&dev.luns, &lun, tailq);
 
-	mobj.buf = calloc(1, SPDK_BDEV_BUF_SIZE_WITH_MD(SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH));
-	SPDK_CU_ASSERT_FATAL(mobj.buf != NULL);
+	alloc_mock_mobj(&mobj, SPDK_ISCSI_MAX_RECV_DATA_SEGMENT_LENGTH);
 
 	/* Test scenario is as follows.
 	 *
@@ -2584,7 +2596,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("iscsi_suite", NULL, NULL);
@@ -2614,9 +2625,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, data_out_pdu_sequence_test);
 	CU_ADD_TEST(suite, immediate_data_and_data_out_pdu_sequence_test);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

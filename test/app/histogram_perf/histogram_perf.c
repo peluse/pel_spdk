@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2017 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -44,6 +44,7 @@ main(int argc, char **argv)
 		}
 	}
 
+	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
 	if (spdk_env_init(&opts)) {
 		printf("Err: Unable to initialize SPDK env\n");

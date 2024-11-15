@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2020 Intel Corporation. All rights reserved.
  */
 
 #ifndef _VFIO_INTERNAL_H
@@ -12,7 +12,7 @@
 #define VFIO_USER_MINOR_VER			1
 
 /* Maximum memory regions supported */
-#define VFIO_MAXIMUM_MEMORY_REGIONS		128
+#define VFIO_MAXIMUM_MEMORY_REGIONS		16
 /* Maximum sparse memory regions in one BAR region */
 #define VFIO_MAXIMUM_SPARSE_MMAP_REGIONS	8
 

@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2022 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -170,7 +170,7 @@ ftl_l2p_flat_deinit(struct spdk_ftl_dev *dev)
 }
 
 void
-ftl_l2p_flat_unmap(struct spdk_ftl_dev *dev, ftl_l2p_cb cb, void *cb_ctx)
+ftl_l2p_flat_trim(struct spdk_ftl_dev *dev, ftl_l2p_cb cb, void *cb_ctx)
 {
 	cb(dev, 0, cb_ctx);
 }
@@ -188,5 +188,10 @@ ftl_l2p_flat_is_halted(struct spdk_ftl_dev *dev)
 
 void
 ftl_l2p_flat_halt(struct spdk_ftl_dev *dev)
+{
+}
+
+void
+ftl_l2p_flat_resume(struct spdk_ftl_dev *dev)
 {
 }

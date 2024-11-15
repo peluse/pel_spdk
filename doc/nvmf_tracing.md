@@ -89,11 +89,11 @@ reboot will also free all of the /dev/shm files.
 ## Capturing a snapshot of events {#capture_tracepoints}
 
 Send I/Os to the SPDK target application to generate events. The following is
-an example usage of perf to send I/Os to the NVMe-oF target over an RDMA network
+an example usage of spdk_nvme_perf to send I/Os to the NVMe-oF target over an RDMA network
 interface for 10 minutes.
 
 ~~~bash
-./perf -q 128 -o 4096 -w randread -t 600 -r 'trtype:RDMA adrfam:IPv4 traddr:192.168.100.2 trsvcid:4420'
+spdk_nvme_perf -q 128 -o 4096 -w randread -t 600 -r 'trtype:RDMA adrfam:IPv4 traddr:192.168.100.2 trsvcid:4420'
 ~~~
 
 The spdk_trace program can be found in the app/trace directory.  To analyze the tracepoints on the same
@@ -185,7 +185,7 @@ build/bin/spdk_trace_record -q -s nvmf -p 24147 -f /tmp/spdk_nvmf_record.trace
 Also send I/Os to the SPDK target application to generate events by previous perf example for 10 minutes.
 
 ~~~bash
-./perf -q 128 -o 4096 -w randread -t 600 -r 'trtype:RDMA adrfam:IPv4 traddr:192.168.100.2 trsvcid:4420'
+spdk_nvme_perf -q 128 -o 4096 -w randread -t 600 -r 'trtype:RDMA adrfam:IPv4 traddr:192.168.100.2 trsvcid:4420'
 ~~~
 
 After the completion of perf example, shut down spdk_trace_record by signal SIGINT (Ctrl + C).
@@ -215,17 +215,19 @@ within the application/library using the spdk_trace_register_description functio
 as shown below:
 
 ~~~c
-SPDK_TRACE_REGISTER_FN(nvmf_trace, "nvmf_rdma", TRACE_GROUP_NVMF_RDMA)
+static void
+nvmf_trace(void)
 {
 	spdk_trace_register_object(OBJECT_NVMF_RDMA_IO, 'r');
 	spdk_trace_register_description("RDMA_REQ_NEW", TRACE_RDMA_REQUEST_STATE_NEW,
-					OWNER_NONE, OBJECT_NVMF_RDMA_IO, 1,
+					OWNER_TYPE_NONE, OBJECT_NVMF_RDMA_IO, 1,
 					SPDK_TRACE_ARG_TYPE_PTR, "qpair");
 	spdk_trace_register_description("RDMA_REQ_NEED_BUFFER", TRACE_RDMA_REQUEST_STATE_NEED_BUFFER,
-					OWNER_NONE, OBJECT_NVMF_RDMA_IO, 0,
+					OWNER_TYPE_NONE, OBJECT_NVMF_RDMA_IO, 0,
 					SPDK_TRACE_ARG_TYPE_PTR, "qpair");
 	...
 }
+SPDK_TRACE_REGISTER_FN(nvmf_trace, "nvmf_rdma", TRACE_GROUP_NVMF_RDMA)
 ~~~
 
 Finally, use the spdk_trace_record function at the appropriate point in the

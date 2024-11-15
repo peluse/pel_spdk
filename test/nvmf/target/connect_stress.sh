@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2021 Intel Corporation
+#  All rights reserved.
+#
 
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../../..)
@@ -13,7 +17,7 @@ $rpc_py nvmf_create_subsystem nqn.2016-06.io.spdk:cnode1 -a -s SPDK0000000000000
 $rpc_py nvmf_subsystem_add_listener nqn.2016-06.io.spdk:cnode1 -t $TEST_TRANSPORT -a $NVMF_FIRST_TARGET_IP -s $NVMF_PORT
 $rpc_py bdev_null_create NULL1 1000 512
 
-$rootdir/test/nvme/connect_stress/connect_stress -c 0x1 -r "trtype:$TEST_TRANSPORT adrfam:IPv4 traddr:$NVMF_FIRST_TARGET_IP trsvcid:$NVMF_PORT subnqn:nqn.2016-06.io.spdk:cnode1" -t 10 &
+$rootdir/test/nvme/connect_stress/connect_stress -c 0x1 -r "trtype:$TEST_TRANSPORT adrfam:IPv4 traddr:$NVMF_FIRST_TARGET_IP trsvcid:$NVMF_PORT subnqn:nqn.2016-06.io.spdk:cnode1" -t 10 "${NO_HUGE[@]}" &
 PERF_PID=$!
 
 rpcs=$SPDK_TEST_STORAGE/rpc.txt

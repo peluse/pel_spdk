@@ -1,7 +1,7 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
- *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ *   Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
 
 #include "spdk/stdinc.h"
@@ -50,6 +50,7 @@ struct bdevio_request {
 	struct iovec fused_iov[BUFFER_IOVS];
 	int fused_iovcnt;
 	struct io_target *target;
+	uint64_t src_offset;
 };
 
 struct io_target *g_io_targets = NULL;
@@ -74,6 +75,14 @@ wake_ut_thread(void)
 }
 
 static void
+__exit_io_thread(void *arg)
+{
+	assert(spdk_get_thread() == g_thread_io);
+	spdk_thread_exit(g_thread_io);
+	wake_ut_thread();
+}
+
+static void
 __get_io_channel(void *arg)
 {
 	struct io_target *target = arg;
@@ -90,29 +99,34 @@ bdevio_construct_target_open_cb(enum spdk_bdev_event_type type, struct spdk_bdev
 }
 
 static int
-bdevio_construct_target(struct spdk_bdev *bdev)
+bdevio_construct_target_by_name(const char *bdev_name)
 {
 	struct io_target *target;
+	struct spdk_bdev *bdev;
+	uint64_t num_blocks;
+	uint32_t block_size;
 	int rc;
-	uint64_t num_blocks = spdk_bdev_get_num_blocks(bdev);
-	uint32_t block_size = spdk_bdev_get_block_size(bdev);
 
 	target = malloc(sizeof(struct io_target));
 	if (target == NULL) {
 		return -ENOMEM;
 	}
 
-	rc = spdk_bdev_open_ext(spdk_bdev_get_name(bdev), true, bdevio_construct_target_open_cb, NULL,
+	rc = spdk_bdev_open_ext(bdev_name, true, bdevio_construct_target_open_cb, NULL,
 				&target->bdev_desc);
 	if (rc != 0) {
 		free(target);
-		SPDK_ERRLOG("Could not open leaf bdev %s, error=%d\n", spdk_bdev_get_name(bdev), rc);
+		SPDK_ERRLOG("Could not open leaf bdev %s, error=%d\n", bdev_name, rc);
 		return rc;
 	}
 
+	bdev = spdk_bdev_desc_get_bdev(target->bdev_desc);
+
+	num_blocks = spdk_bdev_get_num_blocks(bdev);
+	block_size = spdk_bdev_get_block_size(bdev);
+
 	printf("  %s: %" PRIu64 " blocks of %" PRIu32 " bytes (%" PRIu64 " MiB)\n",
-	       spdk_bdev_get_name(bdev),
-	       num_blocks, block_size,
+	       bdev_name, num_blocks, block_size,
 	       (num_blocks * block_size + 1024 * 1024 - 1) / (1024 * 1024));
 
 	target->bdev = bdev;
@@ -124,21 +138,24 @@ bdevio_construct_target(struct spdk_bdev *bdev)
 }
 
 static int
+bdevio_construct_target(void *ctx, struct spdk_bdev *bdev)
+{
+	const char *bdev_name = spdk_bdev_get_name(bdev);
+
+	return bdevio_construct_target_by_name(bdev_name);
+}
+
+static int
 bdevio_construct_targets(void)
 {
-	struct spdk_bdev *bdev;
 	int rc;
 
 	printf("I/O targets:\n");
 
-	bdev = spdk_bdev_first_leaf();
-	while (bdev != NULL) {
-		rc = bdevio_construct_target(bdev);
-		if (rc < 0) {
-			SPDK_ERRLOG("Could not construct bdev %s, error=%d\n", spdk_bdev_get_name(bdev), rc);
-			return rc;
-		}
-		bdev = spdk_bdev_next_leaf(bdev);
+	rc = spdk_for_each_bdev_leaf(NULL, bdevio_construct_target);
+	if (rc < 0) {
+		SPDK_ERRLOG("Could not complete constructing bdevs, error=%d\n", rc);
+		return rc;
 	}
 
 	if (g_io_targets == NULL) {
@@ -176,10 +193,18 @@ bdevio_cleanup_targets(void)
 static bool g_completion_success;
 
 static void
-initialize_buffer(char **buf, int pattern, int size)
+initialize_buffer(char **buf, int pattern, int size, uint32_t block_size)
 {
+	CU_ASSERT(block_size != 0);
+
 	*buf = spdk_zmalloc(size, 0x1000, NULL, SPDK_ENV_LCORE_ID_ANY, SPDK_MALLOC_DMA);
 	memset(*buf, pattern, size);
+
+	if (pattern) {
+		for (int offset = 0, block = 0; offset < size; offset += block_size, block++) {
+			*(*buf + offset) = block;
+		}
+	}
 }
 
 static void
@@ -396,6 +421,41 @@ blockdev_read(struct io_target *target, char *rx_buf,
 	execute_spdk_function(__blockdev_read, &req);
 }
 
+static void
+_blockdev_copy(void *arg)
+{
+	struct bdevio_request *req = arg;
+	struct io_target *target = req->target;
+	struct spdk_bdev *bdev = target->bdev;
+	int rc;
+
+	rc = spdk_bdev_copy_blocks(target->bdev_desc, target->ch,
+				   bdev_bytes_to_blocks(bdev, req->offset),
+				   bdev_bytes_to_blocks(bdev, req->src_offset),
+				   bdev_bytes_to_blocks(bdev, req->data_len),
+				   quick_test_complete, NULL);
+
+	if (rc) {
+		g_completion_success = false;
+		wake_ut_thread();
+	}
+}
+
+static void
+blockdev_copy(struct io_target *target, uint64_t dst_offset, uint64_t src_offset, int data_len)
+{
+	struct bdevio_request req;
+
+	req.target = target;
+	req.data_len = data_len;
+	req.offset = dst_offset;
+	req.src_offset = src_offset;
+
+	g_completion_success = false;
+
+	execute_spdk_function(_blockdev_copy, &req);
+}
+
 static int
 blockdev_write_read_data_match(char *rx_buf, char *tx_buf, int data_length)
 {
@@ -404,7 +464,7 @@ blockdev_write_read_data_match(char *rx_buf, char *tx_buf, int data_length)
 
 static void
 blockdev_write_read(uint32_t data_length, uint32_t iov_len, int pattern, uint64_t offset,
-		    int expected_rc, bool write_zeroes)
+		    int expected_rc, bool write_zeroes, uint32_t block_size)
 {
 	struct io_target *target;
 	char	*tx_buf = NULL;
@@ -429,13 +489,13 @@ blockdev_write_read(uint32_t data_length, uint32_t iov_len, int pattern, uint64_
 	}
 
 	if (!write_zeroes) {
-		initialize_buffer(&tx_buf, pattern, write_data_len);
-		initialize_buffer(&rx_buf, 0, data_length);
+		initialize_buffer(&tx_buf, pattern, write_data_len, block_size);
+		initialize_buffer(&rx_buf, 0, data_length, block_size);
 
 		blockdev_write(target, tx_buf, write_offset, write_data_len, iov_len);
 	} else {
-		initialize_buffer(&tx_buf, 0, write_data_len);
-		initialize_buffer(&rx_buf, pattern, data_length);
+		initialize_buffer(&tx_buf, 0, write_data_len, block_size);
+		initialize_buffer(&rx_buf, pattern, data_length, block_size);
 
 		blockdev_write_zeroes(target, tx_buf, write_offset, write_data_len);
 	}
@@ -468,17 +528,17 @@ blockdev_write_read(uint32_t data_length, uint32_t iov_len, int pattern, uint64_
 static void
 blockdev_compare_and_write(uint32_t data_length, uint32_t iov_len, uint64_t offset)
 {
-	struct io_target *target;
+	struct io_target *target = g_current_io_target;
+	struct spdk_bdev *bdev = target->bdev;
 	char	*tx_buf = NULL;
 	char	*write_buf = NULL;
 	char	*rx_buf = NULL;
 	int	rc;
+	const uint32_t block_size = spdk_bdev_get_block_size(bdev);
 
-	target = g_current_io_target;
-
-	initialize_buffer(&tx_buf, 0xAA, data_length);
-	initialize_buffer(&rx_buf, 0, data_length);
-	initialize_buffer(&write_buf, 0xBB, data_length);
+	initialize_buffer(&tx_buf, 0xAA, data_length, block_size);
+	initialize_buffer(&rx_buf, 0, data_length, block_size);
+	initialize_buffer(&write_buf, 0xBB, data_length, block_size);
 
 	blockdev_write(target, tx_buf, offset, data_length, iov_len);
 	CU_ASSERT_EQUAL(g_completion_success, true);
@@ -510,9 +570,10 @@ blockdev_write_read_block(void)
 	int expected_rc;
 	struct io_target *target = g_current_io_target;
 	struct spdk_bdev *bdev = target->bdev;
+	const uint32_t block_size = spdk_bdev_get_block_size(bdev);
 
 	/* Data size = 1 block */
-	data_length = spdk_bdev_get_block_size(bdev);
+	data_length = block_size;
 	CU_ASSERT_TRUE(data_length < BUFFER_SIZE);
 	offset = 0;
 	pattern = 0xA3;
@@ -520,7 +581,7 @@ blockdev_write_read_block(void)
 	 * of write and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -532,16 +593,17 @@ blockdev_write_zeroes_read_block(void)
 	int expected_rc;
 	struct io_target *target = g_current_io_target;
 	struct spdk_bdev *bdev = target->bdev;
+	const uint32_t block_size = spdk_bdev_get_block_size(bdev);
 
 	/* Data size = 1 block */
-	data_length = spdk_bdev_get_block_size(bdev);
+	data_length = block_size;
 	offset = 0;
 	pattern = 0xA3;
 	/* Params are valid, hence the expected return value
 	 * of write_zeroes and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 1);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 1, block_size);
 }
 
 /*
@@ -556,17 +618,18 @@ blockdev_write_zeroes_read_no_split(void)
 	int expected_rc;
 	struct io_target *target = g_current_io_target;
 	struct spdk_bdev *bdev = target->bdev;
+	const uint32_t block_size = spdk_bdev_get_block_size(bdev);
 
 	/* Data size = block size aligned ZERO_BUFFER_SIZE */
 	data_length = ZERO_BUFFER_SIZE; /* from bdev_internal.h */
-	data_length -= ZERO_BUFFER_SIZE % spdk_bdev_get_block_size(bdev);
+	data_length -= ZERO_BUFFER_SIZE % block_size;
 	offset = 0;
 	pattern = 0xA3;
 	/* Params are valid, hence the expected return value
 	 * of write_zeroes and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 1);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 1, block_size);
 }
 
 /*
@@ -582,17 +645,18 @@ blockdev_write_zeroes_read_split(void)
 	int expected_rc;
 	struct io_target *target = g_current_io_target;
 	struct spdk_bdev *bdev = target->bdev;
+	const uint32_t block_size = spdk_bdev_get_block_size(bdev);
 
 	/* Data size = block size aligned 3 * ZERO_BUFFER_SIZE */
 	data_length = 3 * ZERO_BUFFER_SIZE; /* from bdev_internal.h */
-	data_length -= data_length % spdk_bdev_get_block_size(bdev);
+	data_length -= data_length % block_size;
 	offset = 0;
 	pattern = 0xA3;
 	/* Params are valid, hence the expected return value
 	 * of write_zeroes and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 1);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 1, block_size);
 }
 
 /*
@@ -621,7 +685,7 @@ blockdev_write_zeroes_read_split_partial(void)
 	 * of write_zeroes and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 1);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 1, block_size);
 }
 
 static void
@@ -633,9 +697,10 @@ blockdev_writev_readv_block(void)
 	int expected_rc;
 	struct io_target *target = g_current_io_target;
 	struct spdk_bdev *bdev = target->bdev;
+	const uint32_t block_size = spdk_bdev_get_block_size(bdev);
 
 	/* Data size = 1 block */
-	data_length = spdk_bdev_get_block_size(bdev);
+	data_length = block_size;
 	iov_len = data_length;
 	CU_ASSERT_TRUE(data_length < BUFFER_SIZE);
 	offset = 0;
@@ -644,7 +709,7 @@ blockdev_writev_readv_block(void)
 	 * of write and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, iov_len, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, iov_len, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -695,7 +760,7 @@ blockdev_writev_readv_30x1block(void)
 	 * of write and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, iov_len, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, iov_len, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -707,9 +772,10 @@ blockdev_write_read_8blocks(void)
 	int expected_rc;
 	struct io_target *target = g_current_io_target;
 	struct spdk_bdev *bdev = target->bdev;
+	const uint32_t block_size = spdk_bdev_get_block_size(bdev);
 
 	/* Data size = 8 * block size */
-	data_length = spdk_bdev_get_block_size(bdev) * 8;
+	data_length = block_size * 8;
 	CU_ASSERT_TRUE(data_length < BUFFER_SIZE);
 	offset = data_length;
 	pattern = 0xA3;
@@ -717,7 +783,7 @@ blockdev_write_read_8blocks(void)
 	 * of write and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -729,9 +795,11 @@ blockdev_writev_readv_8blocks(void)
 	int expected_rc;
 	struct io_target *target = g_current_io_target;
 	struct spdk_bdev *bdev = target->bdev;
+	const uint32_t block_size = spdk_bdev_get_block_size(bdev);
+
 
 	/* Data size = 8 * block size */
-	data_length = spdk_bdev_get_block_size(bdev) * 8;
+	data_length = block_size * 8;
 	iov_len = data_length;
 	CU_ASSERT_TRUE(data_length < BUFFER_SIZE);
 	offset = data_length;
@@ -740,7 +808,7 @@ blockdev_writev_readv_8blocks(void)
 	 * of write and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, iov_len, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, iov_len, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -765,7 +833,7 @@ blockdev_write_read_size_gt_128k(void)
 	 * of write and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -791,7 +859,7 @@ blockdev_writev_readv_size_gt_128k(void)
 	 * of write and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, iov_len, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, iov_len, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -817,7 +885,7 @@ blockdev_writev_readv_size_gt_128k_two_iov(void)
 	 * of write and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, iov_len, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, iov_len, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -840,7 +908,7 @@ blockdev_write_read_invalid_size(void)
 	 * of write and read for all blockdevs is < 0 */
 	expected_rc = -1;
 
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -865,7 +933,7 @@ blockdev_write_read_offset_plus_nbytes_equals_bdev_size(void)
 	 * of write and read for all blockdevs is 0. */
 	expected_rc = 0;
 
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -892,7 +960,7 @@ blockdev_write_read_offset_plus_nbytes_gt_bdev_size(void)
 	 * of write and read for all blockdevs is < 0 */
 	expected_rc = -1;
 
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -904,8 +972,9 @@ blockdev_write_read_max_offset(void)
 	int expected_rc;
 	struct io_target *target = g_current_io_target;
 	struct spdk_bdev *bdev = target->bdev;
+	const uint32_t block_size = spdk_bdev_get_block_size(bdev);
 
-	data_length = spdk_bdev_get_block_size(bdev);
+	data_length = block_size;
 	CU_ASSERT_TRUE(data_length < BUFFER_SIZE);
 	/* The start offset has been set to UINT64_MAX such that
 	 * adding nbytes wraps around and points to an invalid address. */
@@ -915,7 +984,7 @@ blockdev_write_read_max_offset(void)
 	 * of write and read for all blockdevs is < 0 */
 	expected_rc = -1;
 
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -927,9 +996,10 @@ blockdev_overlapped_write_read_2blocks(void)
 	int expected_rc;
 	struct io_target *target = g_current_io_target;
 	struct spdk_bdev *bdev = target->bdev;
+	const uint32_t block_size = spdk_bdev_get_block_size(bdev);
 
 	/* Data size = 2 blocks */
-	data_length = spdk_bdev_get_block_size(bdev) * 2;
+	data_length = block_size * 2;
 	CU_ASSERT_TRUE(data_length < BUFFER_SIZE);
 	offset = 0;
 	pattern = 0xA3;
@@ -938,7 +1008,7 @@ blockdev_overlapped_write_read_2blocks(void)
 	expected_rc = 0;
 	/* Assert the write by comparing it with values read
 	 * from the same offset for each blockdev */
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0, block_size);
 
 	/* Overwrite the pattern 0xbb of size 2*block size on an address offset
 	 * overlapping with the address written above and assert the new value in
@@ -949,7 +1019,7 @@ blockdev_overlapped_write_read_2blocks(void)
 	offset = spdk_bdev_get_block_size(bdev);
 	/* Assert the write by comparing it with values read
 	 * from the overlapped offset for each blockdev */
-	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0);
+	blockdev_write_read(data_length, 0, pattern, offset, expected_rc, 0, block_size);
 }
 
 static void
@@ -1135,6 +1205,43 @@ blockdev_test_nvme_admin_passthru(void)
 }
 
 static void
+blockdev_test_copy(void)
+{
+	uint32_t data_length;
+	uint64_t src_offset, dst_offset;
+	struct io_target *target = g_current_io_target;
+	struct spdk_bdev *bdev = target->bdev;
+	char *tx_buf = NULL;
+	char *rx_buf = NULL;
+	int rc;
+	const uint32_t block_size = spdk_bdev_get_block_size(bdev);
+
+	if (!spdk_bdev_io_type_supported(target->bdev, SPDK_BDEV_IO_TYPE_COPY)) {
+		return;
+	}
+
+	data_length = block_size;
+	CU_ASSERT_TRUE(data_length < BUFFER_SIZE);
+	src_offset = 0;
+	dst_offset = block_size;
+
+	initialize_buffer(&tx_buf, 0xAA, data_length, block_size);
+	initialize_buffer(&rx_buf, 0, data_length, block_size);
+
+	blockdev_write(target, tx_buf, src_offset, data_length, data_length);
+	CU_ASSERT_EQUAL(g_completion_success, true);
+
+	blockdev_copy(target, dst_offset, src_offset, data_length);
+	CU_ASSERT_EQUAL(g_completion_success, true);
+
+	blockdev_read(target, rx_buf, dst_offset, data_length, data_length);
+	CU_ASSERT_EQUAL(g_completion_success, true);
+
+	rc = blockdev_write_read_data_match(rx_buf, tx_buf, data_length);
+	CU_ASSERT_EQUAL(rc, 0);
+}
+
+static void
 __stop_init_thread(void *arg)
 {
 	unsigned num_failures = g_num_failures;
@@ -1148,6 +1255,9 @@ __stop_init_thread(void *arg)
 		rpc_perform_tests_cb(num_failures, request);
 		return;
 	}
+	assert(spdk_get_thread() == g_thread_init);
+	assert(spdk_thread_is_app_thread(NULL));
+	execute_spdk_function(__exit_io_thread, NULL);
 	spdk_app_stop(num_failures);
 }
 
@@ -1237,6 +1347,8 @@ __setup_ut_on_single_target(struct io_target *target)
 			       blockdev_test_nvme_passthru_vendor_specific) == NULL
 		|| CU_add_test(suite, "blockdev nvme admin passthru",
 			       blockdev_test_nvme_admin_passthru) == NULL
+		|| CU_add_test(suite, "blockdev copy",
+			       blockdev_test_copy) == NULL
 	) {
 		CU_cleanup_registry();
 		rc = CU_get_error();
@@ -1251,12 +1363,12 @@ __run_ut_thread(void *arg)
 	struct spdk_jsonrpc_request *request = arg;
 	int rc = 0;
 	struct io_target *target;
-	unsigned num_failures;
 
 	if (CU_initialize_registry() != CUE_SUCCESS) {
 		/* CUnit error, probably won't recover */
 		rc = CU_get_error();
-		stop_init_thread(-rc, request);
+		rc = -rc;
+		goto ret;
 	}
 
 	target = g_io_targets;
@@ -1264,16 +1376,20 @@ __run_ut_thread(void *arg)
 		rc = __setup_ut_on_single_target(target);
 		if (rc < 0) {
 			/* CUnit error, probably won't recover */
-			stop_init_thread(-rc, request);
+			rc = -rc;
+			goto ret;
 		}
 		target = target->next;
 	}
 	CU_basic_set_mode(CU_BRM_VERBOSE);
 	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	rc = CU_get_number_of_failures();
 	CU_cleanup_registry();
 
-	stop_init_thread(num_failures, request);
+ret:
+	stop_init_thread(rc, request);
+	assert(spdk_get_thread() == g_thread_ut);
+	spdk_thread_exit(g_thread_ut);
 }
 
 static void
@@ -1379,7 +1495,6 @@ static void
 rpc_perform_tests(struct spdk_jsonrpc_request *request, const struct spdk_json_val *params)
 {
 	struct rpc_perform_tests req = {NULL};
-	struct spdk_bdev *bdev;
 	int rc;
 
 	if (params && spdk_json_decode_object(params, rpc_perform_tests_decoders,
@@ -1391,20 +1506,12 @@ rpc_perform_tests(struct spdk_jsonrpc_request *request, const struct spdk_json_v
 	}
 
 	if (req.name) {
-		bdev = spdk_bdev_get_by_name(req.name);
-		if (bdev == NULL) {
-			SPDK_ERRLOG("Bdev '%s' does not exist\n", req.name);
-			spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
-							     "Bdev '%s' does not exist: %s",
-							     req.name, spdk_strerror(ENODEV));
-			goto invalid;
-		}
-		rc = bdevio_construct_target(bdev);
+		rc = bdevio_construct_target_by_name(req.name);
 		if (rc < 0) {
-			SPDK_ERRLOG("Could not construct target for bdev '%s'\n", spdk_bdev_get_name(bdev));
+			SPDK_ERRLOG("Could not construct target for bdev '%s'\n", req.name);
 			spdk_jsonrpc_send_error_response_fmt(request, SPDK_JSONRPC_ERROR_INTERNAL_ERROR,
 							     "Could not construct target for bdev '%s': %s",
-							     spdk_bdev_get_name(bdev), spdk_strerror(-rc));
+							     req.name, spdk_strerror(-rc));
 			goto invalid;
 		}
 	} else {
@@ -1445,11 +1552,16 @@ main(int argc, char **argv)
 	opts.name = "bdevio";
 	opts.reactor_mask = "0x7";
 	opts.shutdown_cb = spdk_bdevio_shutdown_cb;
+	opts.rpc_addr = NULL;
 
 	if ((rc = spdk_app_parse_args(argc, argv, &opts, "w", NULL,
 				      bdevio_parse_arg, bdevio_usage)) !=
 	    SPDK_APP_PARSE_ARGS_SUCCESS) {
 		return rc;
+	}
+
+	if (g_wait_for_tests && opts.rpc_addr == NULL) {
+		opts.rpc_addr = SPDK_DEFAULT_RPC_ADDR;
 	}
 
 	rc = spdk_app_start(&opts, test_main, NULL);

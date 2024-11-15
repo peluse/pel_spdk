@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -14,6 +14,10 @@
 #include "spdk/stdinc.h"
 
 #include "spdk/assert.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 #pragma pack(push, 1)
 
@@ -112,5 +116,9 @@ struct spdk_gpt_partition_entry {
 SPDK_STATIC_ASSERT(sizeof(struct spdk_gpt_partition_entry) == 128, "size incorrect");
 
 #pragma pack(pop)
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

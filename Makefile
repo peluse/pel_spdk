@@ -1,6 +1,7 @@
 #  SPDX-License-Identifier: BSD-3-Clause
-#  Copyright (c) Intel Corporation.
+#  Copyright (C) 2015 Intel Corporation.
 #  Copyright (c) 2020, Mellanox Corporation.
+#  Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES
 #  All rights reserved.
 #
 
@@ -18,9 +19,12 @@ DIRS-$(CONFIG_APPS) += app
 DIRS-y += test
 DIRS-$(CONFIG_IPSEC_MB) += ipsecbuild
 DIRS-$(CONFIG_ISAL) += isalbuild
+DIRS-$(CONFIG_ISAL_CRYPTO) += isalcryptobuild
 DIRS-$(CONFIG_VFIO_USER) += vfiouserbuild
 DIRS-$(CONFIG_SMA) += proto
 DIRS-$(CONFIG_XNVME) += xnvmebuild
+DIRS-$(CONFIG_GOLANG) += go/rpc
+DIRS-y += python
 
 .PHONY: all clean $(DIRS-y) include/spdk/config.h mk/config.mk \
 	cc_version cxx_version .libs_only_other .ldflags ldflags install \
@@ -62,6 +66,10 @@ ifeq ($(CONFIG_ISAL),y)
 ISALBUILD = isalbuild
 LIB += isalbuild
 DPDK_DEPS += isalbuild
+ifeq ($(CONFIG_ISAL_CRYPTO),y)
+ISALCRYPTOBUILD = isalcryptobuild
+LIB += isalcryptobuild
+endif
 endif
 
 ifeq ($(CONFIG_VFIO_USER),y)
@@ -90,7 +98,7 @@ dpdkdeps $(DPDK_DEPS): $(WPDK)
 dpdkbuild: $(WPDK) $(DPDK_DEPS)
 endif
 
-lib: $(WPDK) $(DPDKBUILD) $(VFIOUSERBUILD) $(XNVMEBUILD) $(ISALBUILD)
+lib: $(WPDK) $(DPDKBUILD) $(VFIOUSERBUILD) $(XNVMEBUILD) $(ISALBUILD) $(ISALCRYPTOBUILD)
 module: lib
 shared_lib: module
 app: $(LIB)

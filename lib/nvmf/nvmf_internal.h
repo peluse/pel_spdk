@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2016 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  *   Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
@@ -9,6 +9,7 @@
 
 #include "spdk/stdinc.h"
 
+#include "spdk/keyring.h"
 #include "spdk/likely.h"
 #include "spdk/nvmf.h"
 #include "spdk/nvmf_cmd.h"
@@ -19,10 +20,20 @@
 #include "spdk/queue.h"
 #include "spdk/util.h"
 #include "spdk/thread.h"
+#include "spdk/tree.h"
+#include "spdk/bit_array.h"
 
 /* The spec reserves cntlid values in the range FFF0h to FFFFh. */
 #define NVMF_MIN_CNTLID 1
 #define NVMF_MAX_CNTLID 0xFFEF
+
+enum spdk_nvmf_tgt_state {
+	NVMF_TGT_IDLE = 0,
+	NVMF_TGT_RUNNING,
+	NVMF_TGT_PAUSING,
+	NVMF_TGT_PAUSED,
+	NVMF_TGT_RESUMING,
+};
 
 enum spdk_nvmf_subsystem_state {
 	SPDK_NVMF_SUBSYSTEM_INACTIVE = 0,
@@ -35,6 +46,8 @@ enum spdk_nvmf_subsystem_state {
 	SPDK_NVMF_SUBSYSTEM_NUM_STATES,
 };
 
+RB_HEAD(subsystem_tree, spdk_nvmf_subsystem);
+
 struct spdk_nvmf_tgt {
 	char					name[NVMF_TGT_NAME_MAX_LENGTH];
 
@@ -44,13 +57,17 @@ struct spdk_nvmf_tgt {
 
 	uint32_t				max_subsystems;
 
-	enum spdk_nvmf_tgt_discovery_filter	discovery_filter;
+	uint32_t				discovery_filter;
 
-	/* Array of subsystem pointers of size max_subsystems indexed by sid */
-	struct spdk_nvmf_subsystem		**subsystems;
+	enum spdk_nvmf_tgt_state                state;
+
+	struct spdk_bit_array			*subsystem_ids;
+
+	struct subsystem_tree			subsystems;
 
 	TAILQ_HEAD(, spdk_nvmf_transport)	transports;
 	TAILQ_HEAD(, spdk_nvmf_poll_group)	poll_groups;
+	TAILQ_HEAD(, spdk_nvmf_referral)	referrals;
 
 	/* Used for round-robin assignment of connections to poll groups */
 	struct spdk_nvmf_poll_group		*next_poll_group;
@@ -59,12 +76,19 @@ struct spdk_nvmf_tgt {
 	void					*destroy_cb_arg;
 
 	uint16_t				crdt[3];
+	uint16_t				num_poll_groups;
+
+	/* Allowed DH-HMAC-CHAP digests/dhgroups */
+	uint32_t				dhchap_digests;
+	uint32_t				dhchap_dhgroups;
 
 	TAILQ_ENTRY(spdk_nvmf_tgt)		link;
 };
 
 struct spdk_nvmf_host {
 	char				nqn[SPDK_NVMF_NQN_MAX_LEN + 1];
+	struct spdk_key			*dhchap_key;
+	struct spdk_key			*dhchap_ctrlr_key;
 	TAILQ_ENTRY(spdk_nvmf_host)	link;
 };
 
@@ -77,25 +101,16 @@ struct spdk_nvmf_subsystem_listener {
 	enum spdk_nvme_ana_state			*ana_state;
 	uint64_t					ana_state_change_count;
 	uint16_t					id;
+	struct spdk_nvmf_listener_opts			opts;
 	TAILQ_ENTRY(spdk_nvmf_subsystem_listener)	link;
 };
 
-/* Maximum number of registrants supported per namespace */
-#define SPDK_NVMF_MAX_NUM_REGISTRANTS		16
-
-struct spdk_nvmf_registrant_info {
-	uint64_t		rkey;
-	char			host_uuid[SPDK_UUID_STRING_LEN];
-};
-
-struct spdk_nvmf_reservation_info {
-	bool					ptpl_activated;
-	enum spdk_nvme_reservation_type		rtype;
-	uint64_t				crkey;
-	char					bdev_uuid[SPDK_UUID_STRING_LEN];
-	char					holder_uuid[SPDK_UUID_STRING_LEN];
-	uint32_t				num_regs;
-	struct spdk_nvmf_registrant_info	registrants[SPDK_NVMF_MAX_NUM_REGISTRANTS];
+struct spdk_nvmf_referral {
+	/* Discovery Log Page Entry for this referral */
+	struct spdk_nvmf_discovery_log_page_entry entry;
+	/* Transport ID */
+	struct spdk_nvme_transport_id trid;
+	TAILQ_ENTRY(spdk_nvmf_referral) link;
 };
 
 struct spdk_nvmf_subsystem_pg_ns_info {
@@ -110,6 +125,7 @@ struct spdk_nvmf_subsystem_pg_ns_info {
 	/* Host ID for the registrants with the namespace */
 	struct spdk_uuid		reg_hostid[SPDK_NVMF_MAX_NUM_REGISTRANTS];
 	uint64_t			num_blocks;
+	uint32_t			anagrpid;
 
 	/* I/O outstanding to this namespace */
 	uint64_t			io_outstanding;
@@ -122,13 +138,12 @@ struct spdk_nvmf_subsystem_poll_group {
 	/* Array of namespace information for each namespace indexed by nsid - 1 */
 	struct spdk_nvmf_subsystem_pg_ns_info	*ns_info;
 	uint32_t				num_ns;
+	enum spdk_nvmf_subsystem_state		state;
 
 	/* Number of ADMIN and FABRICS requests outstanding */
 	uint64_t				mgmt_io_outstanding;
 	spdk_nvmf_poll_group_mod_done		cb_fn;
 	void					*cb_arg;
-
-	enum spdk_nvmf_subsystem_state		state;
 
 	TAILQ_HEAD(, spdk_nvmf_request)		queued;
 };
@@ -165,6 +180,14 @@ struct spdk_nvmf_ns {
 	bool ptpl_activated;
 	/* ZCOPY supported on bdev device */
 	bool zcopy;
+	/* Command Set Identifier */
+	enum spdk_nvme_csi csi;
+	/* Make namespace visible to controllers of these hosts */
+	TAILQ_HEAD(, spdk_nvmf_host) hosts;
+	/* Namespace is always visible to all controllers */
+	bool always_visible;
+	/* Namespace id of the underlying device, used for passthrough commands */
+	uint32_t passthru_nsid;
 };
 
 /*
@@ -192,6 +215,7 @@ struct spdk_nvmf_ctrlr {
 	uint16_t			cntlid;
 	char				hostnqn[SPDK_NVMF_NQN_MAX_LEN + 1];
 	struct spdk_nvmf_subsystem	*subsys;
+	struct spdk_bit_array		*visible_ns;
 
 	struct spdk_nvmf_ctrlr_data	cdata;
 
@@ -235,11 +259,27 @@ struct spdk_nvmf_ctrlr {
 	bool				disconnect_is_shn;
 	bool				acre_enabled;
 	bool				dynamic_ctrlr;
+	/* LBA Format Extension Enabled (LBAFEE) */
+	bool				lbafee_enabled;
 
 	TAILQ_ENTRY(spdk_nvmf_ctrlr)	link;
 };
 
 #define NVMF_MAX_LISTENERS_PER_SUBSYSTEM	16
+
+struct nvmf_subsystem_state_change_ctx {
+	struct spdk_nvmf_subsystem			*subsystem;
+	uint16_t					nsid;
+
+	enum spdk_nvmf_subsystem_state			original_state;
+	enum spdk_nvmf_subsystem_state			requested_state;
+	int						status;
+	struct spdk_thread				*thread;
+
+	spdk_nvmf_subsystem_state_change_done		cb_fn;
+	void						*cb_arg;
+	TAILQ_ENTRY(nvmf_subsystem_state_change_ctx)	link;
+};
 
 struct spdk_nvmf_subsystem {
 	struct spdk_thread				*thread;
@@ -251,19 +291,25 @@ struct spdk_nvmf_subsystem {
 
 	uint16_t					next_cntlid;
 	struct {
-		uint8_t					allow_any_host : 1;
 		uint8_t					allow_any_listener : 1;
 		uint8_t					ana_reporting : 1;
-		uint8_t					reserved : 5;
+		uint8_t					reserved : 6;
 	} flags;
 
-	/* boolean for state change synchronization */
-	bool						changing_state;
+	/* Protected against concurrent access by ->mutex */
+	bool						allow_any_host;
 
 	bool						destroying;
 	bool						async_destroy;
 
+	/* FDP related fields */
+	bool						fdp_supported;
+
+	/* Zoned storage related fields */
+	uint64_t					max_zone_append_size_kib;
+
 	struct spdk_nvmf_tgt				*tgt;
+	RB_ENTRY(spdk_nvmf_subsystem)			link;
 
 	/* Array of pointers to namespaces of size max_nsid indexed by nsid - 1 */
 	struct spdk_nvmf_ns				**ns;
@@ -272,14 +318,18 @@ struct spdk_nvmf_subsystem {
 	uint16_t					min_cntlid;
 	uint16_t					max_cntlid;
 
+	uint64_t					max_discard_size_kib;
+	uint64_t					max_write_zeroes_size_kib;
+
 	TAILQ_HEAD(, spdk_nvmf_ctrlr)			ctrlrs;
 
-	/* A mutex used to protect the hosts list and allow_any_host flag. Unlike the namespace
-	 * array, this list is not used on the I/O path (it's needed for handling things like
-	 * the CONNECT command), so use a mutex to protect it instead of requiring the subsystem
-	 * state to be paused. This removes the requirement to pause the subsystem when hosts
-	 * are added or removed dynamically. */
+	/* This mutex is used to protect fields that aren't touched on the I/O path (e.g. it's
+	 * needed for handling things like the CONNECT command) instead of requiring the subsystem
+	 * to be paused.  It makes it possible to modify those fields (e.g. add/remove hosts)
+	 * without affecting outstanding I/O requests.
+	 */
 	pthread_mutex_t					mutex;
+	/* Protected against concurrent access by ->mutex */
 	TAILQ_HEAD(, spdk_nvmf_host)			hosts;
 	TAILQ_HEAD(, spdk_nvmf_subsystem_listener)	listeners;
 	struct spdk_bit_array				*used_listener_ids;
@@ -297,7 +347,20 @@ struct spdk_nvmf_subsystem {
 	 * It will be enough for ANA group to use the same size as namespaces.
 	 */
 	uint32_t					*ana_group;
+	/* Queue of a state change requests */
+	TAILQ_HEAD(, nvmf_subsystem_state_change_ctx)	state_changes;
+	/* In-band authentication sequence number, protected by ->mutex */
+	uint32_t					auth_seqnum;
+	bool						passthrough;
 };
+
+static int
+subsystem_cmp(struct spdk_nvmf_subsystem *subsystem1, struct spdk_nvmf_subsystem *subsystem2)
+{
+	return strncmp(subsystem1->subnqn, subsystem2->subnqn, sizeof(subsystem1->subnqn));
+}
+
+RB_GENERATE_STATIC(subsystem_tree, spdk_nvmf_subsystem, link, subsystem_cmp);
 
 int nvmf_poll_group_update_subsystem(struct spdk_nvmf_poll_group *group,
 				     struct spdk_nvmf_subsystem *subsystem);
@@ -313,7 +376,6 @@ void nvmf_poll_group_pause_subsystem(struct spdk_nvmf_poll_group *group,
 void nvmf_poll_group_resume_subsystem(struct spdk_nvmf_poll_group *group,
 				      struct spdk_nvmf_subsystem *subsystem, spdk_nvmf_poll_group_mod_done cb_fn, void *cb_arg);
 
-void nvmf_update_discovery_log(struct spdk_nvmf_tgt *tgt, const char *hostnqn);
 void nvmf_get_discovery_log_page(struct spdk_nvmf_tgt *tgt, const char *hostnqn, struct iovec *iov,
 				 uint32_t iovcnt, uint64_t offset, uint32_t length,
 				 struct spdk_nvme_transport_id *cmd_source_trid);
@@ -323,11 +385,14 @@ int nvmf_ctrlr_process_admin_cmd(struct spdk_nvmf_request *req);
 int nvmf_ctrlr_process_io_cmd(struct spdk_nvmf_request *req);
 bool nvmf_ctrlr_dsm_supported(struct spdk_nvmf_ctrlr *ctrlr);
 bool nvmf_ctrlr_write_zeroes_supported(struct spdk_nvmf_ctrlr *ctrlr);
+bool nvmf_ctrlr_copy_supported(struct spdk_nvmf_ctrlr *ctrlr);
 void nvmf_ctrlr_ns_changed(struct spdk_nvmf_ctrlr *ctrlr, uint32_t nsid);
 bool nvmf_ctrlr_use_zcopy(struct spdk_nvmf_request *req);
 
 void nvmf_bdev_ctrlr_identify_ns(struct spdk_nvmf_ns *ns, struct spdk_nvme_ns_data *nsdata,
 				 bool dif_insert_or_strip);
+void nvmf_bdev_ctrlr_identify_iocs_nvm(struct spdk_nvmf_ns *ns,
+				       struct spdk_nvme_nvm_ns_data *nsdata_nvm);
 int nvmf_bdev_ctrlr_read_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 			     struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
 int nvmf_bdev_ctrlr_write_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
@@ -342,6 +407,8 @@ int nvmf_bdev_ctrlr_flush_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *des
 			      struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
 int nvmf_bdev_ctrlr_dsm_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 			    struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
+int nvmf_bdev_ctrlr_copy_cmd(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
+			     struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
 int nvmf_bdev_ctrlr_nvme_passthru_io(struct spdk_bdev *bdev, struct spdk_bdev_desc *desc,
 				     struct spdk_io_channel *ch, struct spdk_nvmf_request *req);
 bool nvmf_bdev_ctrlr_get_dif_ctx(struct spdk_bdev *bdev, struct spdk_nvme_cmd *cmd,
@@ -356,54 +423,50 @@ void nvmf_subsystem_remove_all_listeners(struct spdk_nvmf_subsystem *subsystem,
 		bool stop);
 struct spdk_nvmf_ctrlr *nvmf_subsystem_get_ctrlr(struct spdk_nvmf_subsystem *subsystem,
 		uint16_t cntlid);
+bool nvmf_subsystem_host_auth_required(struct spdk_nvmf_subsystem *subsystem, const char *hostnqn);
+enum nvmf_auth_key_type {
+	NVMF_AUTH_KEY_HOST,
+	NVMF_AUTH_KEY_CTRLR,
+};
+struct spdk_key *nvmf_subsystem_get_dhchap_key(struct spdk_nvmf_subsystem *subsys, const char *nqn,
+		enum nvmf_auth_key_type type);
 struct spdk_nvmf_subsystem_listener *nvmf_subsystem_find_listener(
 	struct spdk_nvmf_subsystem *subsystem,
 	const struct spdk_nvme_transport_id *trid);
+bool nvmf_subsystem_zone_append_supported(struct spdk_nvmf_subsystem *subsystem);
 struct spdk_nvmf_listener *nvmf_transport_find_listener(
 	struct spdk_nvmf_transport *transport,
 	const struct spdk_nvme_transport_id *trid);
 void nvmf_transport_dump_opts(struct spdk_nvmf_transport *transport, struct spdk_json_write_ctx *w,
 			      bool named);
-void nvmf_transport_listen_dump_opts(struct spdk_nvmf_transport *transport,
-				     const struct spdk_nvme_transport_id *trid, struct spdk_json_write_ctx *w);
-void nvmf_subsystem_set_ana_state(struct spdk_nvmf_subsystem *subsystem,
-				  const struct spdk_nvme_transport_id *trid,
-				  enum spdk_nvme_ana_state ana_state, uint32_t anagrpid,
-				  spdk_nvmf_tgt_subsystem_listen_done_fn cb_fn, void *cb_arg);
-bool nvmf_subsystem_get_ana_reporting(struct spdk_nvmf_subsystem *subsystem);
-
-/**
- * Sets the controller ID range for a subsystem.
- * Valid range is [1, 0xFFEF].
- *
- * May only be performed on subsystems in the INACTIVE state.
- *
- * \param subsystem Subsystem to modify.
- * \param min_cntlid Minimum controller ID.
- * \param max_cntlid Maximum controller ID.
- *
- * \return 0 on success, or negated errno value on failure.
- */
-int nvmf_subsystem_set_cntlid_range(struct spdk_nvmf_subsystem *subsystem,
-				    uint16_t min_cntlid, uint16_t max_cntlid);
+void nvmf_transport_listen_dump_trid(const struct spdk_nvme_transport_id *trid,
+				     struct spdk_json_write_ctx *w);
 
 int nvmf_ctrlr_async_event_ns_notice(struct spdk_nvmf_ctrlr *ctrlr);
 int nvmf_ctrlr_async_event_ana_change_notice(struct spdk_nvmf_ctrlr *ctrlr);
 void nvmf_ctrlr_async_event_discovery_log_change_notice(void *ctx);
 void nvmf_ctrlr_async_event_reservation_notification(struct spdk_nvmf_ctrlr *ctrlr);
-int nvmf_ctrlr_async_event_error_event(struct spdk_nvmf_ctrlr *ctrlr,
-				       union spdk_nvme_async_event_completion event);
+
 void nvmf_ns_reservation_request(void *ctx);
 void nvmf_ctrlr_reservation_notice_log(struct spdk_nvmf_ctrlr *ctrlr,
 				       struct spdk_nvmf_ns *ns,
 				       enum spdk_nvme_reservation_notification_log_page_type type);
 
-/*
- * Abort aer is sent on a per controller basis and sends a completion for the aer to the host.
- * This function should be called when attempting to recover in error paths when it is OK for
- * the host to send a subsequent AER.
- */
-void nvmf_ctrlr_abort_aer(struct spdk_nvmf_ctrlr *ctrlr);
+bool nvmf_ns_is_ptpl_capable(const struct spdk_nvmf_ns *ns);
+
+static inline struct spdk_nvmf_host *
+nvmf_ns_find_host(struct spdk_nvmf_ns *ns, const char *hostnqn)
+{
+	struct spdk_nvmf_host *host = NULL;
+
+	TAILQ_FOREACH(host, &ns->hosts, link) {
+		if (strcmp(hostnqn, host->nqn) == 0) {
+			return host;
+		}
+	}
+
+	return NULL;
+}
 
 /*
  * Abort zero-copy requests that already got the buffer (received zcopy_start cb), but haven't
@@ -425,6 +488,24 @@ int nvmf_ctrlr_abort_request(struct spdk_nvmf_request *req);
 
 void nvmf_ctrlr_set_fatal_status(struct spdk_nvmf_ctrlr *ctrlr);
 
+static inline bool
+nvmf_ctrlr_ns_is_visible(struct spdk_nvmf_ctrlr *ctrlr, uint32_t nsid)
+{
+	assert(nsid > 0 && nsid <= ctrlr->subsys->max_nsid);
+	return spdk_bit_array_get(ctrlr->visible_ns, nsid - 1);
+}
+
+static inline void
+nvmf_ctrlr_ns_set_visible(struct spdk_nvmf_ctrlr *ctrlr, uint32_t nsid, bool visible)
+{
+	assert(nsid > 0 && nsid <= ctrlr->subsys->max_nsid);
+	if (visible) {
+		spdk_bit_array_set(ctrlr->visible_ns, nsid - 1);
+	} else {
+		spdk_bit_array_clear(ctrlr->visible_ns, nsid - 1);
+	}
+}
+
 static inline struct spdk_nvmf_ns *
 _nvmf_subsystem_get_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid)
 {
@@ -436,11 +517,46 @@ _nvmf_subsystem_get_ns(struct spdk_nvmf_subsystem *subsystem, uint32_t nsid)
 	return subsystem->ns[nsid - 1];
 }
 
+static inline struct spdk_nvmf_ns *
+nvmf_ctrlr_get_ns(struct spdk_nvmf_ctrlr *ctrlr, uint32_t nsid)
+{
+	struct spdk_nvmf_subsystem *subsystem = ctrlr->subsys;
+	struct spdk_nvmf_ns *ns = _nvmf_subsystem_get_ns(subsystem, nsid);
+
+	return ns && nvmf_ctrlr_ns_is_visible(ctrlr, nsid) ? ns : NULL;
+}
+
 static inline bool
 nvmf_qpair_is_admin_queue(struct spdk_nvmf_qpair *qpair)
 {
 	return qpair->qid == 0;
 }
+
+void nvmf_qpair_set_state(struct spdk_nvmf_qpair *qpair, enum spdk_nvmf_qpair_state state);
+
+int nvmf_qpair_auth_init(struct spdk_nvmf_qpair *qpair);
+void nvmf_qpair_auth_destroy(struct spdk_nvmf_qpair *qpair);
+void nvmf_qpair_auth_dump(struct spdk_nvmf_qpair *qpair, struct spdk_json_write_ctx *w);
+
+int nvmf_auth_request_exec(struct spdk_nvmf_request *req);
+bool nvmf_auth_is_supported(void);
+
+static inline bool
+nvmf_request_is_fabric_connect(struct spdk_nvmf_request *req)
+{
+	return req->cmd->nvmf_cmd.opcode == SPDK_NVME_OPC_FABRIC &&
+	       req->cmd->nvmf_cmd.fctype == SPDK_NVMF_FABRIC_COMMAND_CONNECT;
+}
+
+/*
+ * Tests whether a given string represents a valid NQN.
+ */
+bool nvmf_nqn_is_valid(const char *nqn);
+
+/*
+ * Tests whether a given NQN describes a discovery subsystem.
+ */
+bool nvmf_nqn_is_discovery(const char *nqn);
 
 /**
  * Initiates a zcopy start operation
@@ -467,5 +583,54 @@ int nvmf_bdev_ctrlr_zcopy_start(struct spdk_bdev *bdev,
  * \param commit Flag indicating whether the buffers should be committed
  */
 void nvmf_bdev_ctrlr_zcopy_end(struct spdk_nvmf_request *req, bool commit);
+
+/**
+ * Publishes the mDNS PRR (Pull Registration Request) for the NVMe-oF target.
+ *
+ * \param tgt The NVMe-oF target
+ *
+ * \return 0 on success, negative errno on failure
+ */
+int nvmf_publish_mdns_prr(struct spdk_nvmf_tgt *tgt);
+
+/**
+ * Stops the mDNS PRR (Pull Registration Request) for the NVMe-oF target.
+ *
+ * \param tgt The NVMe-oF target
+ */
+void nvmf_tgt_stop_mdns_prr(struct spdk_nvmf_tgt *tgt);
+
+/**
+ * Updates the listener list in the mDNS PRR (Pull Registration Request) for the NVMe-oF target.
+ *
+ * \param tgt The NVMe-oF target
+ *
+ * \return 0 on success, negative errno on failure
+ */
+int nvmf_tgt_update_mdns_prr(struct spdk_nvmf_tgt *tgt);
+
+static inline struct spdk_nvmf_transport_poll_group *
+nvmf_get_transport_poll_group(struct spdk_nvmf_poll_group *group,
+			      struct spdk_nvmf_transport *transport)
+{
+	struct spdk_nvmf_transport_poll_group *tgroup;
+
+	TAILQ_FOREACH(tgroup, &group->tgroups, link) {
+		if (tgroup->transport == transport) {
+			return tgroup;
+		}
+	}
+
+	return NULL;
+}
+
+/**
+ * Generates a new NVMF controller id
+ *
+ * \param subsystem The subsystem
+ *
+ * \return unique controller id or 0xFFFF when all controller ids are in use
+ */
+uint16_t nvmf_subsystem_gen_cntlid(struct spdk_nvmf_subsystem *subsystem);
 
 #endif /* __NVMF_INTERNAL_H__ */

@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2019 Intel Corporation. All rights reserved.
  *   Copyright (c) 2019 Mellanox Technologies LTD. All rights reserved.
  */
 
@@ -17,9 +17,9 @@ rpc_env_dpdk_get_mem_stats(struct spdk_jsonrpc_request *request,
 	char default_filename[] = "/tmp/spdk_mem_dump.txt";
 
 	if (params != NULL) {
-		SPDK_ERRLOG("spdk_json_decode_object failed\n");
 		spdk_jsonrpc_send_error_response(request, SPDK_JSONRPC_ERROR_INVALID_PARAMS,
 						 "env_dpdk_get_mem_stats doesn't accept any parameters.\n");
+		return;
 	}
 
 	file = fopen(default_filename, "w");

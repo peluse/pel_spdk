@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2017 Intel Corporation
+#  All rights reserved.
+#
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../..)
 source $rootdir/test/common/autotest_common.sh
@@ -17,7 +20,7 @@ case $1 in
 		echo "  -h |--help                           prints this message"
 		echo ""
 		echo "Environment:"
-		echo "  VM_IMAGE        path to QCOW2 VM image used during test (default: $DEPENDENCY_DIR/spdk_test_image.qcow2)"
+		echo "  VM_IMAGE        path to QCOW2 VM image used during test (default: $DEPENDENCY_DIR/vhost/spdk_test_image.qcow2)"
 		echo ""
 		echo "Tests are performed only on Linux machine. For other OS no action is performed."
 		echo ""

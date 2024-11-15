@@ -1,3 +1,8 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2020 Intel Corporation
+#  All rights reserved.
+#
+
 source "$rootdir/test/common/autotest_common.sh"
 
 setup() {
@@ -9,8 +14,6 @@ setup() {
 }
 
 get_meminfo() {
-	xtrace_disable
-
 	local get=$1
 	local node=$2
 	local var val
@@ -30,8 +33,6 @@ get_meminfo() {
 		echo "$val" && return 0
 	done < <(printf '%s\n' "${mem[@]}")
 	return 1
-
-	xtrace_restore
 }
 
 partition_drive() {
@@ -47,7 +48,7 @@ partition_drive() {
 	done
 
 	# Convert size to sectors for more precise partitioning
-	((size /= $(< "/sys/class/block/$disk/queue/physical_block_size")))
+	((size /= $(< "/sys/class/block/$disk/queue/hw_sector_size")))
 
 	"$rootdir/scripts/sync_dev_uevents.sh" block/partition "${parts[@]}" &
 
@@ -56,7 +57,7 @@ partition_drive() {
 	for ((part = 1; part <= part_no; part++)); do
 		((part_start = part_start == 0 ? 2048 : part_end + 1))
 		((part_end = part_start + size - 1))
-		sgdisk "/dev/$disk" --new="$part:$part_start:$part_end"
+		flock "/dev/$disk" sgdisk "/dev/$disk" --new="$part:$part_start:$part_end"
 	done
 	wait "$!"
 }

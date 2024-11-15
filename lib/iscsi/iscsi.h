@@ -1,6 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2008-2012 Daisuke Aoyama <aoyama@peach.ne.jp>.
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -288,6 +288,7 @@ struct spdk_iscsi_poll_group {
 	STAILQ_HEAD(connections, spdk_iscsi_conn)	connections;
 	struct spdk_sock_group				*sock_group;
 	TAILQ_ENTRY(spdk_iscsi_poll_group)		link;
+	uint32_t					num_active_targets;
 };
 
 struct spdk_iscsi_opts {

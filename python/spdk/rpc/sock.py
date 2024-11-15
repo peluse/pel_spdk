@@ -1,3 +1,8 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2021 Intel Corporation.
+#  All rights reserved.
+
+
 def sock_impl_get_options(client, impl_name=None):
     """Get parameters for the socket layer implementation.
 
@@ -22,9 +27,7 @@ def sock_impl_set_options(client,
                           enable_zerocopy_send_client=None,
                           zerocopy_threshold=None,
                           tls_version=None,
-                          enable_ktls=None,
-                          psk_key=None,
-                          psk_identity=None):
+                          enable_ktls=None):
     """Set parameters for the socket layer implementation.
 
     Args:
@@ -39,8 +42,6 @@ def sock_impl_set_options(client,
         zerocopy_threshold: set zerocopy_threshold in bytes(optional)
         tls_version: set TLS protocol version (optional)
         enable_ktls: enable or disable Kernel TLS (optional)
-        psk_key: set psk_key (optional)
-        psk_identity: set psk_identity (optional)
     """
     params = {}
 
@@ -65,10 +66,6 @@ def sock_impl_set_options(client,
         params['tls_version'] = tls_version
     if enable_ktls is not None:
         params['enable_ktls'] = enable_ktls
-    if psk_key is not None:
-        params['psk_key'] = psk_key
-    if psk_identity is not None:
-        params['psk_identity'] = psk_identity
 
     return client.call('sock_impl_set_options', params)
 
@@ -84,3 +81,9 @@ def sock_set_default_impl(client, impl_name=None):
     params['impl_name'] = impl_name
 
     return client.call('sock_set_default_impl', params)
+
+
+def sock_get_default_impl(client):
+    "Get the default socket implementation name."
+
+    return client.call('sock_get_default_impl')

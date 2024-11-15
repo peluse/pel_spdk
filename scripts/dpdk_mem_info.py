@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2019 Intel Corporation
+#  All rights reserved.
+#
 
 import argparse
 import os
@@ -261,11 +265,10 @@ def parse_segment(line):
 
 
 def parse_mempool_name(line):
-    trash, info = line.split()
     name, addr = line.split('@')
     name = name.replace("<", "")
     name = name.replace(">", "")
-    trash, name = name.split()
+    trash, sep, name = name.partition(' ')
 
     return name
 

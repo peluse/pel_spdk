@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -17,7 +17,7 @@ struct rpc_create_rbd {
 	uint32_t block_size;
 	char **config;
 	char *cluster_name;
-	char *uuid;
+	struct spdk_uuid uuid;
 };
 
 static void
@@ -29,7 +29,6 @@ free_rpc_create_rbd(struct rpc_create_rbd *req)
 	free(req->rbd_name);
 	bdev_rbd_free_config(req->config);
 	free(req->cluster_name);
-	free(req->uuid);
 }
 
 static int
@@ -82,7 +81,7 @@ static const struct spdk_json_object_decoder rpc_create_rbd_decoders[] = {
 	{"block_size", offsetof(struct rpc_create_rbd, block_size), spdk_json_decode_uint32},
 	{"config", offsetof(struct rpc_create_rbd, config), bdev_rbd_decode_config, true},
 	{"cluster_name", offsetof(struct rpc_create_rbd, cluster_name), spdk_json_decode_string, true},
-	{"uuid", offsetof(struct rpc_create_rbd, uuid), spdk_json_decode_string, true}
+	{"uuid", offsetof(struct rpc_create_rbd, uuid), spdk_json_decode_uuid, true}
 };
 
 static void
@@ -93,8 +92,6 @@ rpc_bdev_rbd_create(struct spdk_jsonrpc_request *request,
 	struct spdk_json_write_ctx *w;
 	struct spdk_bdev *bdev;
 	int rc = 0;
-	struct spdk_uuid *uuid = NULL;
-	struct spdk_uuid decoded_uuid;
 
 	if (spdk_json_decode_object(params, rpc_create_rbd_decoders,
 				    SPDK_COUNTOF(rpc_create_rbd_decoders),
@@ -105,19 +102,10 @@ rpc_bdev_rbd_create(struct spdk_jsonrpc_request *request,
 		goto cleanup;
 	}
 
-	if (req.uuid) {
-		if (spdk_uuid_parse(&decoded_uuid, req.uuid)) {
-			spdk_jsonrpc_send_error_response(request, -EINVAL,
-							 "Failed to parse bdev UUID");
-			goto cleanup;
-		}
-		uuid = &decoded_uuid;
-	}
-
 	rc = bdev_rbd_create(&bdev, req.name, req.user_id, req.pool_name,
 			     (const char *const *)req.config,
 			     req.rbd_name,
-			     req.block_size, req.cluster_name, uuid);
+			     req.block_size, req.cluster_name, &req.uuid);
 	if (rc) {
 		spdk_jsonrpc_send_error_response(request, rc, spdk_strerror(-rc));
 		goto cleanup;
@@ -230,6 +218,7 @@ free_rpc_register_cluster(struct cluster_register_info *req)
 	bdev_rbd_free_config(req->config_param);
 	free(req->config_file);
 	free(req->key_file);
+	free(req->core_mask);
 }
 
 static const struct spdk_json_object_decoder rpc_register_cluster_decoders[] = {
@@ -237,7 +226,8 @@ static const struct spdk_json_object_decoder rpc_register_cluster_decoders[] = {
 	{"user_id", offsetof(struct cluster_register_info, user_id), spdk_json_decode_string, true},
 	{"config_param", offsetof(struct cluster_register_info, config_param), bdev_rbd_decode_config, true},
 	{"config_file", offsetof(struct cluster_register_info, config_file), spdk_json_decode_string, true},
-	{"key_file", offsetof(struct cluster_register_info, key_file), spdk_json_decode_string, true}
+	{"key_file", offsetof(struct cluster_register_info, key_file), spdk_json_decode_string, true},
+	{"core_mask", offsetof(struct cluster_register_info, core_mask), spdk_json_decode_string, true}
 };
 
 static void

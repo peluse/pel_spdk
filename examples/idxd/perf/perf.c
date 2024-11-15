@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2021 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -523,7 +523,7 @@ _submit_single(struct idxd_chan_entry *t, struct idxd_task *task)
 		/* For fill use the first byte of the task->dst buffer */
 		diov.iov_base = task->dst;
 		diov.iov_len = g_xfer_size_bytes;
-		rc = spdk_idxd_submit_fill(t->ch, &diov, 1, *(uint8_t *)task->src,
+		rc = spdk_idxd_submit_fill(t->ch, &diov, 1, *(uint64_t *)task->src,
 					   flags, idxd_done, task);
 		break;
 	case IDXD_CRC32C:
@@ -687,7 +687,7 @@ dump_result(void)
 	struct idxd_chan_entry *t;
 
 	printf("\nIDXD_ChanID   Core      Transfers      Bandwidth     Failed     Miscompares\n");
-	printf("------------------------------------------------------------------------\n");
+	printf("---------------------------------------------------------------------------\n");
 	while (worker != NULL) {
 		t = worker->ctx;
 		while (t) {
@@ -700,7 +700,7 @@ dump_result(void)
 			total_miscompared += t->injected_miscompares;
 
 			if (xfer_per_sec) {
-				printf("%10d%5u%15" PRIu64 "/s%9" PRIu64 " MiB/s%7" PRIu64 " %11" PRIu64 "\n",
+				printf("%10d%5u%16" PRIu64 "/s%9" PRIu64 " MiB/s%11" PRIu64 " %15" PRIu64 "\n",
 				       t->idxd_chan_id, worker->core, xfer_per_sec, bw_in_MiBps, t->xfer_failed,
 				       t->injected_miscompares);
 			}
@@ -714,8 +714,8 @@ dump_result(void)
 	total_bw_in_MiBps = (total_completed * g_xfer_size_bytes) /
 			    (g_time_in_sec * 1024 * 1024);
 
-	printf("=========================================================================\n");
-	printf("Total:%25" PRIu64 "/s%9" PRIu64 " MiB/s%6" PRIu64 " %11" PRIu64"\n\n",
+	printf("===========================================================================\n");
+	printf("Total:%25" PRIu64 "/s%9" PRIu64 " MiB/s%11" PRIu64 " %15" PRIu64"\n\n",
 	       total_xfer_per_sec, total_bw_in_MiBps, total_failed, total_miscompared);
 
 	return total_failed ? 1 : 0;
@@ -818,6 +818,7 @@ init_env(void)
 {
 	struct spdk_env_opts opts;
 
+	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
 	opts.name = "idxd_perf";
 	opts.core_mask = g_core_mask;

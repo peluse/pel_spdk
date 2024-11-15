@@ -1,6 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2008-2012 Daisuke Aoyama <aoyama@peach.ne.jp>.
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -10,7 +10,6 @@
 #include "iscsi/iscsi.h"
 #include "iscsi/param.h"
 #include "iscsi/conn.h"
-#include "spdk/string.h"
 
 #include "spdk/log.h"
 
@@ -495,7 +494,7 @@ static const char *discovery_ignored_param[] = {
 	"InitialR2T",
 	"ImmediateData",
 	"MaxBurstLength",
-	"FirstBurstLength"
+	"FirstBurstLength",
 	"MaxOutstandingR2T",
 	"DataPDUInOrder",
 	"DataSequenceInOrder",

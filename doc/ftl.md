@@ -7,7 +7,7 @@ physical address mapping and manages the garbage collection process.
 
 ## Terminology {#ftl_terminology}
 
-### Logical to physical address map
+### Logical to physical address map {#ftl_l2p}
 
 - Shorthand: `L2P`
 
@@ -145,7 +145,7 @@ well as on the base devices. The following types of metadata are persisted:
 
 After power failure, FTL needs to rebuild the whole L2P using the address maps (`P2L`) stored within each band/chunk.
 This needs to done, because while individual L2P pages may have been paged out and persisted to the cache device,
-there's no way to tell which, if any, pages were dirty before the power failure occured. The P2L consists of not only
+there's no way to tell which, if any, pages were dirty before the power failure occurred. The P2L consists of not only
 the mapping itself, but also a sequence id (`seq_id`), which describes the relative age of a given logical block
 (multiple writes to the same logical block would produce the same amount of P2L entries, only the last one having the current data).
 
@@ -179,8 +179,7 @@ Both interfaces require the same arguments which are described by the `--help` o
 
 - bdev's name
 - base bdev's name
-- cache bdev's name (cache bdev must support VSS DIX mode - could be emulated by providing SPDK_FTL_VSS_EMU=1 flag to make;
- emulating VSS should be done for testing purposes only, it is not power-fail safe)
+- cache bdev's name (cache bdev must support VSS DIX mode)
 - UUID of the FTL device (if the FTL is to be restored from the SSD)
 
 ## FTL bdev stack {#ftl_bdev_stack}

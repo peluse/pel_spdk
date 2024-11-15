@@ -1,3 +1,7 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation.
+#  All rights reserved.
+
 from concurrent import futures
 from contextlib import contextmanager
 from multiprocessing import Lock
@@ -93,8 +97,12 @@ class StorageManagementAgent(pb2_grpc.StorageManagementAgentServicer):
             if device is None:
                 raise DeviceException(grpc.StatusCode.NOT_FOUND,
                                       'Invalid device handle')
+            if not device.allow_delete_volumes and self._volume_mgr.has_volumes(request.handle):
+                raise DeviceException(grpc.StatusCode.FAILED_PRECONDITION,
+                                      'Device has attached volumes')
             device.delete_device(request)
-            # Remove all volumes attached to that device
+            # Either there are no volumes attached to this device or we're allowed to delete it
+            # with volumes still attached
             self._volume_mgr.disconnect_device_volumes(request.handle)
         except DeviceException as ex:
             context.set_details(ex.message)
@@ -133,9 +141,10 @@ class StorageManagementAgent(pb2_grpc.StorageManagementAgentServicer):
         response = pb2.DetachVolumeResponse()
         try:
             device = self._find_device_by_handle(request.device_handle)
-            if device is not None:
-                device.detach_volume(request)
-                self._volume_mgr.disconnect_volume(request.volume_id)
+            if device is None:
+                raise DeviceException(grpc.StatusCode.NOT_FOUND, 'Invalid device handle')
+            device.detach_volume(request)
+            self._volume_mgr.disconnect_volume(request.volume_id)
         except DeviceException as ex:
             context.set_details(ex.message)
             context.set_code(ex.code)

@@ -1,4 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
+ *   Copyright (C) 2019 Intel Corporation.
  *   Copyright (c) 2018-2019 Broadcom.  All Rights Reserved.
  *   The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
  */
@@ -8,6 +9,10 @@
 
 #include "spdk/env.h"
 #include "spdk/nvme.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*
  * FC-NVMe Spec. Definitions
@@ -396,5 +401,9 @@ struct spdk_nvmf_fc_wwn {
 		uint8_t octets[sizeof(uint64_t)];
 	} u;
 };
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

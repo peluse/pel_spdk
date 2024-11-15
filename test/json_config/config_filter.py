@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2018 Intel Corporation
+#  All rights reserved.
+#
 
 import sys
 import json
@@ -15,7 +19,7 @@ def sort_json_object(o):
             sorted_o[key] = sort_json_object(o[key])
         return sorted_o
     if isinstance(o, list):
-        """ Keep list in the same orded but sort each item """
+        """ Keep list in the same order but sort each item """
         return [sort_json_object(item) for item in o]
     else:
         return o
@@ -37,6 +41,15 @@ def filter_methods(do_remove_global_rpcs):
         'sock_impl_set_options',
         'sock_set_default_impl',
         'framework_set_scheduler',
+        'accel_crypto_key_create',
+        'accel_assign_opc',
+        'accel_set_options',
+        'dpdk_cryptodev_scan_accel_module',
+        'dpdk_cryptodev_set_driver',
+        'virtio_blk_create_transport',
+        'iobuf_set_options',
+        'bdev_raid_set_options',
+        'fsdev_set_opts',
     ]
 
     data = json.loads(sys.stdin.read())
@@ -62,7 +75,7 @@ def filter_methods(do_remove_global_rpcs):
 def check_empty():
     data = json.loads(sys.stdin.read())
     if not data:
-        raise EOFError("Cant read config!")
+        raise EOFError("Can't read config!")
 
     for s in data['subsystems']:
         if s['config']:

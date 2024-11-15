@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2020 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -9,6 +9,10 @@
 #include "spdk/stdinc.h"
 #include "spdk/nvmf.h"
 #include "spdk/bdev.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 enum spdk_nvmf_request_exec_status {
 	SPDK_NVMF_REQUEST_EXEC_STATUS_COMPLETE,
@@ -26,6 +30,42 @@ int spdk_nvmf_ctrlr_identify_ctrlr(struct spdk_nvmf_ctrlr *ctrlr,
 				   struct spdk_nvme_ctrlr_data *cdata);
 
 /**
+ * Fills the I/O Command Set specific Identify Namespace data structure (CNS
+ * 05h)
+ *
+ * \param ctrlr The NVMe-oF controller
+ * \param cmd The NVMe command
+ * \param rsp The NVMe command completion
+ * \param nsdata The filled in I/O command set specific identify namespace
+ * attributes
+ * \param nsdata_size The size of nsdata
+ * \return \ref spdk_nvmf_request_exec_status
+ */
+int spdk_nvmf_ns_identify_iocs_specific(struct spdk_nvmf_ctrlr *ctrlr,
+					struct spdk_nvme_cmd *cmd,
+					struct spdk_nvme_cpl *rsp,
+					void *nsdata,
+					size_t nsdata_size);
+
+/**
+ * Fills the I/O Command Set specific Identify Controller data structure (CNS
+ * 06h)
+ *
+ * \param ctrlr The NVMe-oF controller
+ * \param cmd The NVMe command
+ * \param rsp The NVMe command completion
+ * \param cdata The filled in I/O command set specific identify controller
+ * attributes
+ * \param cdata_size The size of cdata
+ * \return \ref spdk_nvmf_request_exec_status
+ */
+int spdk_nvmf_ctrlr_identify_iocs_specific(struct spdk_nvmf_ctrlr *ctrlr,
+		struct spdk_nvme_cmd *cmd,
+		struct spdk_nvme_cpl *rsp,
+		void *cdata,
+		size_t cdata_size);
+
+/**
  * Fills the identify namespace attributes for the specified controller
  *
  * \param ctrlr The NVMe-oF controller
@@ -38,6 +78,19 @@ int spdk_nvmf_ctrlr_identify_ns(struct spdk_nvmf_ctrlr *ctrlr,
 				struct spdk_nvme_cmd *cmd,
 				struct spdk_nvme_cpl *rsp,
 				struct spdk_nvme_ns_data *nsdata);
+
+/**
+ * Fills the identify namespace attributes for the specified controller.
+ *
+ * This funtion uses nvme passthru for the namespaces that are backed by bdevs
+ * that support NVME_ADMIN IO type. It differs from spdk_nvmf_ctrlr_identify_ns
+ * by requesting identify namespace data and populate performance and atomic
+ * operations fields.
+ *
+ * \param req The NVMe-oF request
+ * \return \ref spdk_nvmf_request_exec_status
+ */
+int spdk_nvmf_ctrlr_identify_ns_ext(struct spdk_nvmf_request *req);
 
 /**
  * Callback function definition for a custom admin command handler.
@@ -159,13 +212,28 @@ struct spdk_nvmf_ctrlr *spdk_nvmf_request_get_ctrlr(struct spdk_nvmf_request *re
 struct spdk_nvmf_subsystem *spdk_nvmf_request_get_subsystem(struct spdk_nvmf_request *req);
 
 /**
- * Get the data and length associated with this request.
+ * Copy the data from the given @buf into the request iovec.
  *
  * \param req The NVMe-oF request
- * \param data The data buffer associated with this request
- * \param length The length of the data buffer
+ * \param buf The data buffer
+ * \param buflen The length of the data buffer
+ *
+ * \return the number of bytes copied
  */
-void spdk_nvmf_request_get_data(struct spdk_nvmf_request *req, void **data, uint32_t *length);
+size_t spdk_nvmf_request_copy_from_buf(struct spdk_nvmf_request *req,
+				       void *buf, size_t buflen);
+
+/**
+ * Copy the data from the request iovec into the given @buf.
+ *
+ * \param req The NVMe-oF request
+ * \param buf The data buffer
+ * \param buflen The length of the data buffer
+ *
+ * \return the number of bytes copied
+ */
+size_t spdk_nvmf_request_copy_to_buf(struct spdk_nvmf_request *req,
+				     void *buf, size_t buflen);
 
 /**
  * Get the NVMe-oF command associated with this request.
@@ -194,5 +262,9 @@ struct spdk_nvme_cpl *spdk_nvmf_request_get_response(struct spdk_nvmf_request *r
  * \return req_to_abort The NVMe-oF request that is in process of being aborted
  */
 struct spdk_nvmf_request *spdk_nvmf_request_get_req_to_abort(struct spdk_nvmf_request *req);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* SPDK_NVMF_CMD_H_ */

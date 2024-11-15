@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2019 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -8,7 +8,7 @@
 
 #include "spdk_internal/mock.h"
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "common/lib/test_env.c"
 #include "sock/posix/posix.c"
@@ -21,8 +21,13 @@ DEFINE_STUB(spdk_sock_map_lookup, int, (struct spdk_sock_map *map, int placement
 DEFINE_STUB(spdk_sock_map_find_free, int, (struct spdk_sock_map *map), -1);
 DEFINE_STUB_V(spdk_sock_map_cleanup, (struct spdk_sock_map *map));
 
-DEFINE_STUB_V(spdk_net_impl_register, (struct spdk_net_impl *impl, int priority));
+DEFINE_STUB_V(spdk_net_impl_register, (struct spdk_net_impl *impl));
+DEFINE_STUB(spdk_sock_set_default_impl, int, (const char *impl_name), 0);
 DEFINE_STUB(spdk_sock_close, int, (struct spdk_sock **s), 0);
+DEFINE_STUB(spdk_sock_group_provide_buf, int, (struct spdk_sock_group *group, void *buf,
+		size_t len, void *ctx), 0);
+DEFINE_STUB(spdk_sock_group_get_buf, size_t, (struct spdk_sock_group *group, void **buf,
+		void **ctx), 0);
 
 static void
 _req_cb(void *cb_arg, int len)
@@ -72,7 +77,7 @@ flush(void)
 	MOCK_SET(sendmsg, 64);
 	cb_arg1 = false;
 	rc = _sock_flush(sock);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == 64);
 	CU_ASSERT(cb_arg1 == true);
 	CU_ASSERT(TAILQ_EMPTY(&sock->queued_reqs));
 
@@ -83,7 +88,7 @@ flush(void)
 	cb_arg1 = false;
 	cb_arg2 = false;
 	rc = _sock_flush(sock);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == 128);
 	CU_ASSERT(cb_arg1 == true);
 	CU_ASSERT(cb_arg2 == true);
 	CU_ASSERT(TAILQ_EMPTY(&sock->queued_reqs));
@@ -95,7 +100,7 @@ flush(void)
 	cb_arg1 = false;
 	cb_arg2 = false;
 	rc = _sock_flush(sock);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == 64);
 	CU_ASSERT(cb_arg1 == true);
 	CU_ASSERT(cb_arg2 == false);
 	CU_ASSERT(TAILQ_FIRST(&sock->queued_reqs) == req2);
@@ -107,7 +112,7 @@ flush(void)
 	MOCK_SET(sendmsg, 10);
 	cb_arg1 = false;
 	rc = _sock_flush(sock);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == 10);
 	CU_ASSERT(cb_arg1 == false);
 	CU_ASSERT(TAILQ_FIRST(&sock->queued_reqs) == req1);
 
@@ -115,7 +120,7 @@ flush(void)
 	MOCK_SET(sendmsg, 24);
 	cb_arg1 = false;
 	rc = _sock_flush(sock);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == 24);
 	CU_ASSERT(cb_arg1 == false);
 	CU_ASSERT(TAILQ_FIRST(&sock->queued_reqs) == req1);
 
@@ -123,7 +128,7 @@ flush(void)
 	MOCK_SET(sendmsg, 30);
 	cb_arg1 = false;
 	rc = _sock_flush(sock);
-	CU_ASSERT(rc == 0);
+	CU_ASSERT(rc == 30);
 	CU_ASSERT(cb_arg1 == true);
 	CU_ASSERT(TAILQ_EMPTY(&sock->queued_reqs));
 
@@ -137,18 +142,15 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("posix", NULL, NULL);
 
 	CU_ADD_TEST(suite, flush);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
 
-	CU_basic_run_tests();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 
-	num_failures = CU_get_number_of_failures();
 	CU_cleanup_registry();
 
 	return num_failures;

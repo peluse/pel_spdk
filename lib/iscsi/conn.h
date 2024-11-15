@@ -1,6 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2008-2012 Daisuke Aoyama <aoyama@peach.ne.jp>.
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -73,6 +73,7 @@ struct spdk_iscsi_conn {
 	int				login_phase;
 	bool				is_logged_out;
 	struct spdk_iscsi_pdu		*login_rsp_pdu;
+	uint16_t			trace_id;
 
 	uint64_t	last_flush;
 	uint64_t	last_fill;
@@ -129,6 +130,7 @@ struct spdk_iscsi_conn {
 	int header_digest;
 	int data_digest;
 	int full_feature;
+	int scheduled;
 
 	struct iscsi_param *params;
 	bool sess_param_state_negotiated[MAX_SESSION_PARAMS];

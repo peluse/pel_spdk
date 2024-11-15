@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2015 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -15,13 +15,6 @@
 #include "spdk/memory.h"
 
 #define SYSFS_PCI_DRIVERS	"/sys/bus/pci/drivers"
-
-/* Compatibility for versions < 20.11 */
-#if RTE_VERSION < RTE_VERSION_NUM(20, 11, 0, 0)
-#define RTE_DEV_ALLOWED RTE_DEV_WHITELISTED
-#define RTE_DEV_BLOCKED RTE_DEV_BLACKLISTED
-#define RTE_BUS_SCAN_ALLOWLIST RTE_BUS_SCAN_WHITELIST
-#endif
 
 #define PCI_CFG_SIZE		256
 #define PCI_EXT_CAP_ID_SN	0x03
@@ -131,7 +124,6 @@ detach_rte(struct spdk_pci_device *dev)
 	bool removed;
 
 	if (!spdk_process_is_primary()) {
-		remove_rte_dev(rte_dev);
 		return;
 	}
 
@@ -234,8 +226,18 @@ pci_device_rte_dev_event(const char *device_name,
 		TAILQ_FOREACH(dev, &g_pci_devices, internal.tailq) {
 			struct rte_pci_device *rte_dev = dev->dev_handle;
 
-			if (strcmp(dpdk_pci_device_get_name(rte_dev), device_name) == 0 &&
-			    !dev->internal.pending_removal) {
+			if (strcmp(dpdk_pci_device_get_name(rte_dev), device_name)) {
+				continue;
+			}
+
+			/* Note: these ERRLOGs are useful for triaging issue #2983. */
+			if (dev->internal.pending_removal || dev->internal.removed) {
+				SPDK_ERRLOG("Received event for device SPDK already tried to remove\n");
+				SPDK_ERRLOG("pending_removal=%d removed=%d\n", dev->internal.pending_removal,
+					    dev->internal.removed);
+			}
+
+			if (!dev->internal.pending_removal) {
 				can_detach = !dev->internal.attached;
 				/* prevent any further attaches */
 				dev->internal.pending_removal = true;
@@ -244,7 +246,7 @@ pci_device_rte_dev_event(const char *device_name,
 		}
 		pthread_mutex_unlock(&g_pci_mutex);
 
-		if (dev != NULL && can_detach) {
+		if (can_detach) {
 			/* if device is not attached we can remove it right away.
 			 * Otherwise it will be removed at detach.
 			 *
@@ -256,6 +258,7 @@ pci_device_rte_dev_event(const char *device_name,
 			 * moved into the eal in the future, the deferred removal could
 			 * be deleted.
 			 */
+			assert(dev != NULL);
 			rte_eal_alarm_set(1, detach_rte_cb, dev->dev_handle);
 		}
 		break;
@@ -383,7 +386,7 @@ pci_device_init(struct rte_pci_driver *_drv,
 	dev->id.subvendor_id = id->subsystem_vendor_id;
 	dev->id.subdevice_id = id->subsystem_device_id;
 
-	dev->socket_id = dpdk_pci_device_get_numa_node(_dev);
+	dev->numa_id = dpdk_pci_device_get_numa_node(_dev);
 	dev->type = "pci";
 
 	dev->map_bar = map_bar_rte;
@@ -805,6 +808,74 @@ spdk_pci_device_get_interrupt_efd(struct spdk_pci_device *dev)
 	return dpdk_pci_device_get_interrupt_efd(dev->dev_handle);
 }
 
+int
+spdk_pci_device_enable_interrupts(struct spdk_pci_device *dev, uint32_t efd_count)
+{
+	struct rte_pci_device *rte_dev = dev->dev_handle;
+	int rc;
+
+	if (efd_count == 0) {
+		SPDK_ERRLOG("Invalid efd_count (%u)\n", efd_count);
+		return -EINVAL;
+	}
+
+	/* Detect if device has MSI-X capability */
+	if (dpdk_pci_device_interrupt_cap_multi(rte_dev) != 1) {
+		SPDK_ERRLOG("VFIO MSI-X capability not present for device %s\n",
+			    dpdk_pci_device_get_name(rte_dev));
+		return -ENOTSUP;
+	}
+
+	/* Create event file descriptors */
+	rc = dpdk_pci_device_create_interrupt_efds(rte_dev, efd_count);
+	if (rc) {
+		SPDK_ERRLOG("Can't setup eventfd (%u)\n", efd_count);
+		return rc;
+	}
+
+	/* Bind each event fd to each interrupt vector */
+	rc = dpdk_pci_device_enable_interrupt(rte_dev);
+	if (rc) {
+		SPDK_ERRLOG("Failed to enable interrupt for PCI device %s\n",
+			    dpdk_pci_device_get_name(rte_dev));
+		dpdk_pci_device_delete_interrupt_efds(rte_dev);
+		return rc;
+	}
+
+	return 0;
+}
+
+int
+spdk_pci_device_disable_interrupts(struct spdk_pci_device *dev)
+{
+	struct rte_pci_device *rte_dev = dev->dev_handle;
+	int rc;
+
+	rc = dpdk_pci_device_disable_interrupt(rte_dev);
+	if (rc) {
+		SPDK_ERRLOG("Failed to disable interrupt for PCI device %s\n",
+			    dpdk_pci_device_get_name(rte_dev));
+		return rc;
+	}
+
+	dpdk_pci_device_delete_interrupt_efds(rte_dev);
+
+	return 0;
+}
+
+int
+spdk_pci_device_get_interrupt_efd_by_index(struct spdk_pci_device *dev, uint32_t index)
+{
+	if (index == 0) {
+		return dpdk_pci_device_get_interrupt_efd(dev->dev_handle);
+	} else {
+		/* Note: The interrupt vector offset starts from 1, and in DPDK these
+		 * are mapped to efd index 0 onwards.
+		 */
+		return dpdk_pci_device_get_interrupt_efd_by_index(dev->dev_handle, index - 1);
+	}
+}
+
 uint32_t
 spdk_pci_device_get_domain(struct spdk_pci_device *dev)
 {
@@ -860,9 +931,18 @@ spdk_pci_device_get_id(struct spdk_pci_device *dev)
 }
 
 int
+spdk_pci_device_get_numa_id(struct spdk_pci_device *dev)
+{
+	return dev->numa_id;
+}
+
+SPDK_LOG_DEPRECATION_REGISTER(pci_device_socket_id, "spdk_pci_device_get_socket_id", "v25.05", 0);
+
+int
 spdk_pci_device_get_socket_id(struct spdk_pci_device *dev)
 {
-	return dev->socket_id;
+	SPDK_LOG_DEPRECATED(pci_device_socket_id);
+	return spdk_pci_device_get_numa_id(dev);
 }
 
 int

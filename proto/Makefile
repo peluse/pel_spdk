@@ -1,5 +1,5 @@
 #  SPDX-License-Identifier: BSD-3-Clause
-#  Copyright (c) Intel Corporation.
+#  Copyright (C) 2022 Intel Corporation.
 #  All rights reserved.
 #
 
@@ -16,8 +16,6 @@ all: $(protopy)
 clean:
 	$(Q)$(RM) $(protopy)
 
-# TODO: we should probably write a proper install rule here instead of just blindly copying all
-# python scripts when building the RPMs
 install:
 uninstall:
 

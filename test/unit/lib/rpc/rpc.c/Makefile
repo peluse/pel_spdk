@@ -1,5 +1,5 @@
 #  SPDX-License-Identifier: BSD-3-Clause
-#  Copyright (c) Intel Corporation.
+#  Copyright (C) 2015 Intel Corporation.
 #  All rights reserved.
 #
 
@@ -8,7 +8,7 @@ include $(SPDK_ROOT_DIR)/mk/spdk.common.mk
 
 TEST_FILE = rpc_ut.c
 
-SPDK_MOCK_SYSCALLS = \
+SPDK_MOCK_SYMBOLS = \
 	open \
 	close \
 	flock \

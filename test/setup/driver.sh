@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2020 Intel Corporation
+#  All rights reserved.
+#
+
 testdir=$(readlink -f "$(dirname "$0")")
 rootdir=$(readlink -f "$testdir/../../")
 source "$testdir/common.sh"
-
-shopt -s nullglob extglob
 
 dep() { modprobe --show-depends "$1"; }
 mod() { [[ $(dep "$1") == *".ko"* ]]; }
@@ -29,22 +32,11 @@ vfio() {
 	return 1
 }
 
-igb_uio() {
-	is_driver igb_uio
-}
-
 pick_driver() {
 	if vfio; then
 		echo "vfio-pci"
 	elif uio; then
-		# Consider special case for broken uio_pci_generic driver
-		if igb_uio; then
-			echo "@(uio_pci_generic|igb_uio)"
-		else
-			echo "uio_pci_generic"
-		fi
-	elif igb_uio; then
-		echo "igb_uio"
+		echo "uio_pci_generic"
 	else
 		echo "No valid driver found"
 	fi

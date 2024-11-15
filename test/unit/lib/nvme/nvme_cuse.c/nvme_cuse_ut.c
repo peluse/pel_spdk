@@ -1,17 +1,14 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2021 Intel Corporation.
  *   All rights reserved.
  */
 
 #include "spdk/stdinc.h"
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 #include "nvme/nvme_cuse.c"
 #include "common/lib/nvme/common_stubs.h"
 
 SPDK_LOG_REGISTER_COMPONENT(nvme)
-
-DEFINE_STUB(spdk_nvme_ctrlr_alloc_cmb_io_buffer, void *,
-	    (struct spdk_nvme_ctrlr *ctrlr, size_t size), NULL);
 
 DEFINE_STUB(spdk_nvme_ctrlr_cmd_admin_raw, int, (struct spdk_nvme_ctrlr *ctrlr,
 		struct spdk_nvme_cmd *cmd, void *buf, uint32_t len,
@@ -56,10 +53,57 @@ DEFINE_STUB(spdk_nvme_ctrlr_is_active_ns, bool,
 	    (struct spdk_nvme_ctrlr *ctrlr, uint32_t nsid), true);
 
 DEFINE_STUB(fuse_reply_err, int, (fuse_req_t req, int err), 0);
-DEFINE_STUB_V(fuse_session_exit, (struct fuse_session *se));
 DEFINE_STUB(pthread_join, int, (pthread_t tid, void **val), 0);
 
 DEFINE_STUB_V(nvme_ctrlr_update_namespaces, (struct spdk_nvme_ctrlr *ctrlr));
+
+DEFINE_STUB_V(fuse_session_reset, (struct fuse_session *session));
+
+struct fuse_session {
+	int exited;
+	int fd;
+};
+
+int
+fuse_session_fd(struct fuse_session *session)
+{
+	return session->fd;
+}
+
+void
+fuse_session_exit(struct fuse_session *session)
+{
+	session->exited = 1;
+}
+
+int
+fuse_session_exited(struct fuse_session *session)
+{
+	return session->exited;
+}
+
+struct fuse_session *
+cuse_lowlevel_setup(int argc, char *argv[], const struct cuse_info *ci,
+		    const struct cuse_lowlevel_ops *clop, int *multithreaded, void *userdata)
+{
+	struct fuse_session *fuse_session = calloc(1, sizeof(struct fuse_session));
+	if (fuse_session == NULL) {
+		return NULL;
+	}
+	fuse_session->fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+	if (fuse_session->fd < 0) {
+		free(fuse_session);
+		return NULL;
+	}
+	return fuse_session;
+}
+
+void
+cuse_lowlevel_teardown(struct fuse_session	*fuse_session)
+{
+	close(fuse_session->fd);
+	free(fuse_session);
+}
 
 static int
 nvme_ns_cmp(struct spdk_nvme_ns *ns1, struct spdk_nvme_ns *ns2)
@@ -172,7 +216,7 @@ test_cuse_nvme_submit_io_read_write(void)
 				 block_size, md_size, user_io, in_bufsz, out_bufsz);
 	CU_ASSERT(g_ut_ctx != NULL);
 	CU_ASSERT(g_ut_ctx->req == req);
-	CU_ASSERT(g_ut_ctx->lba = user_io->slba);
+	CU_ASSERT(g_ut_ctx->lba == user_io->slba);
 	CU_ASSERT(g_ut_ctx->lba_count == (uint32_t)(user_io->nblocks + 1));
 	CU_ASSERT(g_ut_ctx->data_len ==
 		  (int)((user_io->nblocks + 1) * block_size));
@@ -190,7 +234,7 @@ test_cuse_nvme_submit_io_read_write(void)
 				  block_size, md_size, user_io, in_bufsz, out_bufsz);
 	CU_ASSERT(g_ut_ctx != NULL);
 	CU_ASSERT(g_ut_ctx->req == req);
-	CU_ASSERT(g_ut_ctx->lba = user_io->slba);
+	CU_ASSERT(g_ut_ctx->lba == user_io->slba);
 	CU_ASSERT(g_ut_ctx->lba_count == (uint32_t)(user_io->nblocks + 1));
 	CU_ASSERT(g_ut_ctx->data_len ==
 		  (int)((user_io->nblocks + 1) * block_size));
@@ -234,7 +278,7 @@ test_cuse_nvme_submit_io_read_write_with_md(void)
 				 block_size, md_size, user_io, in_bufsz, out_bufsz);
 	CU_ASSERT(g_ut_ctx != NULL);
 	CU_ASSERT(g_ut_ctx->req == req);
-	CU_ASSERT(g_ut_ctx->lba = user_io->slba);
+	CU_ASSERT(g_ut_ctx->lba == user_io->slba);
 	CU_ASSERT(g_ut_ctx->lba_count == (uint32_t)(user_io->nblocks + 1));
 	CU_ASSERT(g_ut_ctx->data_len ==
 		  (int)((user_io->nblocks + 1) * block_size));
@@ -253,7 +297,7 @@ test_cuse_nvme_submit_io_read_write_with_md(void)
 				  block_size, md_size, user_io, in_bufsz, out_bufsz);
 	CU_ASSERT(g_ut_ctx != NULL);
 	CU_ASSERT(g_ut_ctx->req == req);
-	CU_ASSERT(g_ut_ctx->lba = user_io->slba);
+	CU_ASSERT(g_ut_ctx->lba == user_io->slba);
 	CU_ASSERT(g_ut_ctx->lba_count == (uint32_t)(user_io->nblocks + 1));
 	CU_ASSERT(g_ut_ctx->data_len ==
 		  (int)((user_io->nblocks + 1) * block_size));
@@ -431,7 +475,7 @@ test_cuse_nvme_submit_io(void)
 	SPDK_CU_ASSERT_FATAL(g_ut_ctx != NULL);
 	CU_ASSERT(g_ut_nsid == 1);
 	CU_ASSERT(g_ut_ctx->req == (void *)0xDEEACDFF);
-	CU_ASSERT(g_ut_ctx->lba = 1024);
+	CU_ASSERT(g_ut_ctx->lba == 1024);
 	CU_ASSERT(g_ut_ctx->lba_count == 2);
 	CU_ASSERT(g_ut_ctx->data_len == 2 * 4096);
 	CU_ASSERT(g_ut_ctx->data != NULL);
@@ -450,7 +494,7 @@ test_cuse_nvme_submit_io(void)
 	SPDK_CU_ASSERT_FATAL(g_ut_ctx != NULL);
 	CU_ASSERT(g_ut_nsid == 1);
 	CU_ASSERT(g_ut_ctx->req == req);
-	CU_ASSERT(g_ut_ctx->lba = 1024);
+	CU_ASSERT(g_ut_ctx->lba == 1024);
 	CU_ASSERT(g_ut_ctx->lba_count == 2);
 	CU_ASSERT(g_ut_ctx->data_len == 2 * 4096);
 	CU_ASSERT(g_ut_ctx->data != NULL);
@@ -499,33 +543,85 @@ test_cuse_nvme_reset(void)
 static void
 test_nvme_cuse_stop(void)
 {
+	int rc;
 	struct spdk_nvme_ctrlr ctrlr = {};
-	struct cuse_device *ctrlr_device = NULL;
-	struct cuse_device *ns_dev1, *ns_dev2;
+	ctrlr.cdata.nn = 2;
 
 	/* Allocate memory for nvme_cuse_stop() to free. */
-	ctrlr_device = calloc(1, sizeof(struct cuse_device));
-	SPDK_CU_ASSERT_FATAL(ctrlr_device != NULL);
-
-	TAILQ_INIT(&ctrlr_device->ns_devices);
-	ns_dev1 = calloc(1, sizeof(struct cuse_device));
-	SPDK_CU_ASSERT_FATAL(ns_dev1 != NULL);
-	ns_dev2 = calloc(1, sizeof(struct cuse_device));
-	SPDK_CU_ASSERT_FATAL(ns_dev2 != NULL);
-
-	g_ctrlr_started = spdk_bit_array_create(128);
-	SPDK_CU_ASSERT_FATAL(g_ctrlr_started != NULL);
-
-	TAILQ_INSERT_TAIL(&ctrlr_device->ns_devices, ns_dev1, tailq);
-	TAILQ_INSERT_TAIL(&ctrlr_device->ns_devices, ns_dev2, tailq);
-	ctrlr.cdata.nn = 2;
-	ctrlr_device->ctrlr = &ctrlr;
-	pthread_mutex_init(&g_cuse_mtx, NULL);
-	TAILQ_INSERT_TAIL(&g_ctrlr_ctx_head, ctrlr_device, tailq);
+	rc = spdk_nvme_cuse_register(&ctrlr);
+	CU_ASSERT(rc == 0);
 
 	nvme_cuse_stop(&ctrlr);
 	CU_ASSERT(g_ctrlr_started == NULL);
 	CU_ASSERT(TAILQ_EMPTY(&g_ctrlr_ctx_head));
+	while (g_device_fdgrp != NULL) {
+		sched_yield();
+	}
+}
+
+static void
+test_spdk_nvme_cuse_get_ctrlr_name(void)
+{
+	int rc_ctrlr = 0;
+	int rc_ns = 0;
+	uint32_t nsid = 0;
+	const uint32_t NSID1 = 12;
+	const uint32_t NSID2 = 22;
+	size_t name_size = 0;
+
+	char name_ctrlr[128] = "unit_test_ctrlr_dev_name";
+	char name_ns_1[128] = "unit_test_ns_dev_name_1";
+	char name_ns_2[128] = "unit_test_ns_dev_name_2";
+
+	char rt_name_ctrlr[128];
+	char rt_name_ns[128];
+
+	struct spdk_nvme_ctrlr ctrlr = {};
+	struct cuse_device ctrlr_device = {};
+	struct cuse_device ns_dev1 = {};
+	struct cuse_device ns_dev2 = {};
+
+	ctrlr_device.ctrlr = &ctrlr;
+	memcpy(ctrlr_device.dev_name, name_ctrlr, sizeof(ctrlr_device.dev_name));
+
+	TAILQ_INIT(&ctrlr_device.ns_devices);
+	ns_dev1.nsid = NSID1;
+	ns_dev2.nsid = NSID2;
+
+	memcpy(ns_dev1.dev_name, name_ns_1, sizeof(ns_dev1.dev_name));
+	memcpy(ns_dev2.dev_name, name_ns_2, sizeof(ns_dev2.dev_name));
+	TAILQ_INIT(&g_ctrlr_ctx_head);
+	TAILQ_INIT(&ctrlr_device.ns_devices);
+	TAILQ_INSERT_TAIL(&g_ctrlr_ctx_head, &ctrlr_device, tailq);
+	TAILQ_INSERT_TAIL(&ctrlr_device.ns_devices, &ns_dev1, tailq);
+	TAILQ_INSERT_TAIL(&ctrlr_device.ns_devices, &ns_dev2, tailq);
+
+	/* Test case: Give a null spdk_nvme_ctrlr to find cuse_device. Expect: Return -ENODEV failed */
+	rc_ctrlr = spdk_nvme_cuse_get_ctrlr_name(NULL, rt_name_ctrlr, &name_size);
+	CU_ASSERT(rc_ctrlr == -ENODEV);
+	rc_ns = spdk_nvme_cuse_get_ns_name(NULL, nsid, rt_name_ctrlr, &name_size);
+	CU_ASSERT(rc_ns == -ENODEV);
+
+	/* Test case: Give a wrong nsid to find cuse_device. Expect: Return -ENODEV failed */
+	rc_ns = spdk_nvme_cuse_get_ns_name(&ctrlr, nsid, rt_name_ns, &name_size);
+	CU_ASSERT(rc_ns == -ENODEV);
+
+	/* Test case: Let parameter size<sizeof(dev_name). Expect: Return -ENOSPC failed */
+	name_size = 0;
+	rc_ctrlr = spdk_nvme_cuse_get_ctrlr_name(&ctrlr, rt_name_ctrlr, &name_size);
+	CU_ASSERT(rc_ctrlr == -ENOSPC);
+	name_size = 0;
+	rc_ns = spdk_nvme_cuse_get_ns_name(&ctrlr, NSID1, rt_name_ns, &name_size);
+	CU_ASSERT(rc_ns == -ENOSPC);
+
+	/* Test case: All parameters is conformed to function. Expect: Success */
+	name_size = 128;
+	rc_ctrlr = spdk_nvme_cuse_get_ctrlr_name(&ctrlr, rt_name_ctrlr, &name_size);
+	CU_ASSERT(rc_ctrlr == 0);
+	rc_ns = spdk_nvme_cuse_get_ns_name(&ctrlr, NSID1, rt_name_ns, &name_size);
+	CU_ASSERT(rc_ns == 0);
+	CU_ASSERT(strncmp(rt_name_ctrlr, name_ctrlr, sizeof(name_ctrlr)) == 0);
+	CU_ASSERT(strncmp(rt_name_ns, name_ns_1, sizeof(name_ns_1)) == 0);
 }
 
 int
@@ -534,7 +630,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("nvme_cuse", NULL, NULL);
@@ -546,10 +641,9 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_cuse_nvme_submit_io);
 	CU_ADD_TEST(suite, test_cuse_nvme_reset);
 	CU_ADD_TEST(suite, test_nvme_cuse_stop);
+	CU_ADD_TEST(suite, test_spdk_nvme_cuse_get_ctrlr_name);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

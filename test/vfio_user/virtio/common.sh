@@ -1,3 +1,7 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation.
+#  All rights reserved.
+
 function vfu_tgt_run() {
 	local vhost_name=$1
 	local vfio_user_dir vfu_pid_file rpc_py
@@ -9,7 +13,7 @@ function vfu_tgt_run() {
 	mkdir -p $vfio_user_dir
 
 	timing_enter vfu_tgt_start
-	$rootdir/build/bin/spdk_tgt -r $vfio_user_dir/rpc.sock -m 0xf &
+	$rootdir/build/bin/spdk_tgt -r $vfio_user_dir/rpc.sock -m 0xf -s 512 &
 	vfupid=$!
 	echo $vfupid > $vfu_pid_file
 

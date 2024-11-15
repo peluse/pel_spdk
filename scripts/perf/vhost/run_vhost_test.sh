@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation
+#  All rights reserved.
+#
+
+shopt -s nullglob extglob
 
 curdir=$(readlink -f "$(dirname "$0")")
 rootdir=$(readlink -f "$curdir/../../../")
-
-source "$rootdir/test/vhost/common.sh"
 
 # Allow for the fio_conf() to slurp extra config from the stdin.
 exec {fio_extra_conf}<&0
@@ -29,7 +33,7 @@ fio_conf() {
 	fi
 
 	if [[ -e $fio_extra_conf ]]; then
-		# Overriden through cmdline|env
+		# Overridden through cmdline|env
 		cat "$fio_extra_conf"
 	elif [[ ! -t $fio_extra_conf ]]; then
 		# Attached to stdin
@@ -53,13 +57,24 @@ fio_conf() {
 	FIO
 }
 
-(($#)) && eval "$@"
+(($#)) && eval "$*"
 
-perf_args+=("--vm-image=${vm_image:-$VM_IMAGE}")
+perf_args+=(${vm_image:+--vm-image="$vm_image"})
 perf_args+=("--ctrl-type=${ctrl_type:-spdk_vhost_scsi}")
 perf_args+=(${split:+--use-split})
 perf_args+=(${disk_map:+--disk-map="$disk_map"})
 perf_args+=(${cpu_cfg:+--custom-cpu-cfg="$cpu_cfg"})
+
+if [[ $auto_cfg == yes || $auto_cfg_print == yes ]]; then
+	if [[ $auto_cfg_print == yes ]]; then
+		"$curdir/conf-generator" -p all || exit 1
+		exit 0
+	fi
+	cpu_out=$curdir/auto-cpu.conf disk_out=$curdir/auto-disk.conf \
+		"$curdir/conf-generator" -s || exit 1
+	perf_args+=("--disk-map=$disk_out")
+	perf_args+=("--custom-cpu-cfg=$cpu_out")
+fi
 
 if [[ -n $extra_params ]]; then
 	perf_args+=($extra_params)

@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2021 Intel Corporation
+#  All rights reserved.
+#
 
 testdir=$(readlink -f "$(dirname "$0")")
 rootdir=$(readlink -f "$testdir/../../../")
@@ -8,8 +12,6 @@ set -- "--transport=tcp" "--iso" "$@"
 
 source "$rootdir/test/common/autotest_common.sh"
 source "$rootdir/test/nvmf/common.sh"
-
-shopt -s nullglob
 
 rabort() {
 	local trtype=$1
@@ -39,26 +41,29 @@ rabort() {
 
 spdk_target() {
 	local name=spdk_target
-	local subnqn=nqn.2016-06.io.spdk:$name
 
 	rpc_cmd bdev_nvme_attach_controller -t pcie -a "$nvme" -b "$name"
 
 	rpc_cmd nvmf_create_transport $NVMF_TRANSPORT_OPTS -u 8192
-	rpc_cmd nvmf_create_subsystem "$subnqn" -a -s "$NVMF_SERIAL"
-	rpc_cmd nvmf_subsystem_add_ns "$subnqn" "${name}n1"
-	rpc_cmd nvmf_subsystem_add_listener "$subnqn" -t "$TEST_TRANSPORT" -a "$NVMF_FIRST_TARGET_IP" -s "$NVMF_PORT"
+	rpc_cmd nvmf_create_subsystem "$NVME_SUBNQN" -a -s "$NVMF_SERIAL"
+	rpc_cmd nvmf_subsystem_add_ns "$NVME_SUBNQN" "${name}n1"
+	rpc_cmd nvmf_subsystem_add_listener "$NVME_SUBNQN" -t "$TEST_TRANSPORT" -a "$NVMF_FIRST_TARGET_IP" -s "$NVMF_PORT"
 
-	rabort "$TEST_TRANSPORT" IPv4 "$NVMF_FIRST_TARGET_IP" "$NVMF_PORT" "$subnqn"
+	rabort "$TEST_TRANSPORT" IPv4 "$NVMF_FIRST_TARGET_IP" "$NVMF_PORT" "$NVME_SUBNQN"
 
-	rpc_cmd nvmf_delete_subsystem "$subnqn"
+	rpc_cmd nvmf_delete_subsystem "$NVME_SUBNQN"
 	rpc_cmd bdev_nvme_detach_controller "$name"
+
+	# Make sure we fully detached from the ctrl as vfio-pci won't be able to release the
+	# device otherwise - we can either wait a bit or simply kill the app. Since we don't
+	# really need it at this point, reap it but leave the net setup around. See:
+	# https://github.com/spdk/spdk/issues/2811
+	killprocess "$nvmfpid"
 }
 
 kernel_target() {
-	local name=kernel_target
-
-	configure_kernel_target "$name"
-	rabort "$TEST_TRANSPORT" IPv4 "$NVMF_INITIATOR_IP" "$NVMF_PORT" "$name"
+	configure_kernel_target "$NVME_SUBNQN" "$(get_main_ns_ip)"
+	rabort "$TEST_TRANSPORT" IPv4 "$NVMF_INITIATOR_IP" "$NVMF_PORT" "$NVME_SUBNQN"
 	clean_kernel_target
 }
 

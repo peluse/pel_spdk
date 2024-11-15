@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2018 Intel Corporation.
  *   All rights reserved.
  *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  */
@@ -124,6 +124,18 @@ zeroes_is_zeroes(struct spdk_bs_dev *dev, uint64_t lba, uint64_t lba_count)
 	return true;
 }
 
+static bool
+zeroes_is_range_valid(struct spdk_bs_dev *dev, uint64_t lba, uint64_t lba_count)
+{
+	return true;
+}
+
+static bool
+zeroes_translate_lba(struct spdk_bs_dev *dev, uint64_t lba, uint64_t *base_lba)
+{
+	return false;
+}
+
 static struct spdk_bs_dev g_zeroes_bs_dev = {
 	.blockcnt = UINT64_MAX,
 	.blocklen = 512,
@@ -139,10 +151,18 @@ static struct spdk_bs_dev g_zeroes_bs_dev = {
 	.write_zeroes = zeroes_write_zeroes,
 	.unmap = zeroes_unmap,
 	.is_zeroes = zeroes_is_zeroes,
+	.is_range_valid = zeroes_is_range_valid,
+	.translate_lba = zeroes_translate_lba,
 };
 
 struct spdk_bs_dev *
 bs_create_zeroes_dev(void)
 {
 	return &g_zeroes_bs_dev;
+}
+
+bool
+blob_backed_with_zeroes_dev(struct spdk_blob *blob)
+{
+	return blob != NULL && blob->back_bs_dev == &g_zeroes_bs_dev;
 }

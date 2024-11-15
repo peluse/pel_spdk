@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -54,7 +54,7 @@ get_host_identifier(struct spdk_nvme_ctrlr *ctrlr)
 	uint32_t host_id_size;
 	uint32_t cdw11;
 
-	if (spdk_nvme_ctrlr_get_data(ctrlr)->ctratt.host_id_exhid_supported) {
+	if (spdk_nvme_ctrlr_get_data(ctrlr)->ctratt.bits.host_id_exhid_supported) {
 		host_id_size = 16;
 		cdw11 = 1;
 		printf("Using 128-bit extended host identifier\n");
@@ -96,7 +96,7 @@ set_host_identifier(struct spdk_nvme_ctrlr *ctrlr)
 	uint32_t host_id_size;
 	uint32_t cdw11;
 
-	if (spdk_nvme_ctrlr_get_data(ctrlr)->ctratt.host_id_exhid_supported) {
+	if (spdk_nvme_ctrlr_get_data(ctrlr)->ctratt.bits.host_id_exhid_supported) {
 		host_id_size = 16;
 		cdw11 = 1;
 		printf("Using 128-bit extended host identifier\n");
@@ -397,6 +397,7 @@ main(int argc, char **argv)
 	int			ret = 0;
 	struct spdk_nvme_detach_ctx *detach_ctx = NULL;
 
+	opts.opts_size = sizeof(opts);
 	spdk_env_opts_init(&opts);
 	opts.name = "reserve";
 	opts.core_mask = "0x1";

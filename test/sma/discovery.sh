@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation
+#  All rights reserved.
+#
 testdir=$(readlink -f "$(dirname "$0")")
 rootdir=$(readlink -f "$testdir/../..")
 
@@ -129,13 +132,13 @@ function detach_volume() {
 trap "cleanup; exit 1" SIGINT SIGTERM EXIT
 
 # Start two remote targets
-$rootdir/build/bin/spdk_tgt -r $t1sock &
+$rootdir/build/bin/spdk_tgt -r $t1sock -m 0x1 &
 t1pid=$!
-$rootdir/build/bin/spdk_tgt -r $t2sock &
+$rootdir/build/bin/spdk_tgt -r $t2sock -m 0x2 &
 t2pid=$!
 
 # One target that the SMA will configure
-$rootdir/build/bin/spdk_tgt &
+$rootdir/build/bin/spdk_tgt -m 0x4 &
 tgtpid=$!
 
 # And finally the SMA itself
@@ -149,8 +152,9 @@ $rootdir/scripts/sma.py -c <(
 ) &
 smapid=$!
 
-waitforlisten $t1pid
-waitforlisten $t2pid
+waitforlisten $tgtpid
+waitforlisten $t1pid "$t1sock"
+waitforlisten $t2pid "$t2sock"
 
 # Prepare the targets.  The first one has a single subsystem with a single volume and a single
 # discovery listener.  The second one also has a single subsystem, but has two volumes attached to
@@ -257,7 +261,15 @@ detach_volume $device_id $t1uuid
 $rpc_py bdev_nvme_get_discovery_info | jq -r '.[].trid.trsvcid' | grep $t1dscport
 $rpc_py bdev_nvme_get_discovery_info | jq -r '.[].trid.trsvcid' | grep $t2dscport1
 
-# Delete the device and verify that this also causes the volumes to be disconnected
+# Try to delete the device and verify that it fails if it has volumes attached to it
+NOT delete_device $device_id
+
+[[ $($rpc_py bdev_nvme_get_discovery_info | jq -r '. | length') -eq 2 ]]
+$rpc_py bdev_nvme_get_discovery_info | jq -r '.[].trid.trsvcid' | grep $t1dscport
+$rpc_py bdev_nvme_get_discovery_info | jq -r '.[].trid.trsvcid' | grep $t2dscport1
+
+# After detaching the second volume, it should be possible to delete the device
+detach_volume $device_id $t2uuid
 delete_device $device_id
 
 [[ $($rpc_py bdev_nvme_get_discovery_info | jq -r '. | length') -eq 0 ]]
@@ -296,6 +308,9 @@ $rpc_py nvmf_get_subsystems $localnqn | jq -r '.[].namespaces[].uuid' | grep $t2
 $rpc_py nvmf_get_subsystems $localnqn | jq -r '.[].namespaces[].uuid' | grep $t2uuid2
 
 # Reset the device
+detach_volume $device_id $t1uuid
+detach_volume $device_id $t2uuid
+detach_volume $device_id $t2uuid2
 delete_device $device_id
 [[ $($rpc_py bdev_nvme_get_discovery_info | jq -r '. | length') -eq 0 ]]
 

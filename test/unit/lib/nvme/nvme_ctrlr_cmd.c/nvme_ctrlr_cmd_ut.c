@@ -1,10 +1,10 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *
- *   Copyright (c) Intel Corporation. All rights reserved.
+ *   Copyright (C) 2015 Intel Corporation. All rights reserved.
  *   Copyright (c) 2021 Mellanox Technologies LTD. All rights reserved.
  */
 
-#include "spdk_cunit.h"
+#include "spdk_internal/cunit.h"
 
 #include "nvme/nvme_ctrlr_cmd.c"
 
@@ -50,6 +50,9 @@ DEFINE_STUB(nvme_transport_qpair_iterate_requests, int,
 
 DEFINE_STUB(nvme_qpair_abort_queued_reqs_with_cbarg, uint32_t,
 	    (struct spdk_nvme_qpair *qpair, void *cmd_cb_arg), 0);
+
+DEFINE_STUB(spdk_nvme_ctrlr_get_admin_qp_failure_reason, spdk_nvme_qp_failure_reason,
+	    (struct spdk_nvme_ctrlr *ctrlr), 0);
 
 static int
 nvme_ns_cmp(struct spdk_nvme_ns *ns1, struct spdk_nvme_ns *ns2)
@@ -965,7 +968,8 @@ test_nvme_ctrlr_cmd_identify(void)
 	int rc;
 	MOCK_SET(nvme_ctrlr_submit_admin_request, 0);
 
-	rc = nvme_ctrlr_cmd_identify(&ctrlr, SPDK_NVME_IDENTIFY_NS, 2, 1, 0, &payload, 4096, NULL, NULL);
+	rc = nvme_ctrlr_cmd_identify(&ctrlr, SPDK_NVME_IDENTIFY_NS, 2, 1, 0, &payload,
+				     SPDK_NVME_IDENTIFY_BUFLEN, NULL, NULL);
 	CU_ASSERT(rc == 0);
 	CU_ASSERT(req.cmd.opc == SPDK_NVME_OPC_IDENTIFY);
 	CU_ASSERT(req.cmd.cdw10_bits.identify.cns == SPDK_NVME_IDENTIFY_NS);
@@ -1023,7 +1027,6 @@ main(int argc, char **argv)
 	CU_pSuite	suite = NULL;
 	unsigned int	num_failures;
 
-	CU_set_error_action(CUEA_ABORT);
 	CU_initialize_registry();
 
 	suite = CU_add_suite("nvme_ctrlr_cmd", NULL, NULL);
@@ -1053,9 +1056,7 @@ main(int argc, char **argv)
 	CU_ADD_TEST(suite, test_nvme_ctrlr_cmd_identify);
 	CU_ADD_TEST(suite, test_spdk_nvme_ctrlr_cmd_security_receive_send);
 
-	CU_basic_set_mode(CU_BRM_VERBOSE);
-	CU_basic_run_tests();
-	num_failures = CU_get_number_of_failures();
+	num_failures = spdk_ut_run_tests(argc, argv, NULL);
 	CU_cleanup_registry();
 	return num_failures;
 }

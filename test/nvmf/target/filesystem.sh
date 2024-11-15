@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2016 Intel Corporation
+#  All rights reserved.
+#
 testdir=$(readlink -f $(dirname $0))
 rootdir=$(readlink -f $testdir/../../..)
 source $rootdir/test/setup/common.sh
 source $rootdir/test/common/autotest_common.sh
 source $rootdir/test/nvmf/common.sh
 
-MALLOC_BDEV_SIZE=128
+MALLOC_BDEV_SIZE=512
 MALLOC_BLOCK_SIZE=512
 
 nvmftestinit
@@ -54,7 +57,7 @@ function nvmf_filesystem_part() {
 
 	malloc_size=$(($(get_bdev_size $malloc_name) * 1024 * 1024))
 
-	nvme connect -t $TEST_TRANSPORT -n "nqn.2016-06.io.spdk:cnode1" -a "$NVMF_FIRST_TARGET_IP" -s "$NVMF_PORT"
+	$NVME_CONNECT "${NVME_HOST[@]}" -t $TEST_TRANSPORT -n "nqn.2016-06.io.spdk:cnode1" -a "$NVMF_FIRST_TARGET_IP" -s "$NVMF_PORT"
 
 	waitforserial "$NVMF_SERIAL"
 	nvme_name=$(lsblk -l -o NAME,SERIAL | grep -oP "([\w]*)(?=\s+${NVMF_SERIAL})")
@@ -80,10 +83,15 @@ function nvmf_filesystem_part() {
 		run_test "filesystem_in_capsule_xfs" nvmf_filesystem_create "xfs" ${nvme_name}
 	fi
 
-	parted -s /dev/${nvme_name} rm 1
+	# Make sure the target block device is not held by udev-worker when we attempt to
+	# remove the partition - the removal here forces parted to send BLKRRPART which may
+	# fail in case the device is already locked. By acquiring a lock of our own we make
+	# sure to either block until device is available or make the udev-worker to back off.
+	# See https://github.com/spdk/spdk/issues/2961 for details.
+	flock "/dev/$nvme_name" parted -s "/dev/${nvme_name}" rm 1
 
 	sync
-	nvme disconnect -n "nqn.2016-06.io.spdk:cnode1" || true
+	nvme disconnect -n "nqn.2016-06.io.spdk:cnode1"
 	waitforserial_disconnect "$NVMF_SERIAL"
 
 	$rpc_py nvmf_delete_subsystem nqn.2016-06.io.spdk:cnode1

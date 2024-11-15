@@ -1,7 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2021 Intel Corporation.
  *   All rights reserved.
- *
  */
 
 #include "spdk/stdinc.h"
@@ -159,6 +158,8 @@ idxd_group_config(struct spdk_user_idxd_device *user_idxd)
 	/* Build one group with all of the engines and a single work queue. */
 	grpcfg.wqs[0] = 1;
 	grpcfg.flags.read_buffers_allowed = groupcap.read_bufs;
+	grpcfg.flags.tc_a = 1;
+	grpcfg.flags.tc_b = 1;
 	for (i = 0; i < enginecap.num_engines; i++) {
 		grpcfg.engines |= (1 << i);
 	}
@@ -221,10 +222,12 @@ idxd_wq_config(struct spdk_user_idxd_device *user_idxd)
 
 	wqcfg->wq_size = wqcap.total_wq_size;
 	wqcfg->mode = WQ_MODE_DEDICATED;
-	wqcfg->max_batch_shift = LOG2_WQ_MAX_BATCH;
+	wqcfg->max_batch_shift = user_idxd->registers->gencap.max_batch_shift;
 	wqcfg->max_xfer_shift = LOG2_WQ_MAX_XFER;
 	wqcfg->wq_state = WQ_ENABLED;
 	wqcfg->priority = WQ_PRIORITY_1;
+
+	idxd->batch_size = (1 << wqcfg->max_batch_shift);
 
 	for (i = 0; i < SPDK_COUNTOF(wqcfg->raw); i++) {
 		spdk_mmio_write_4(&wqcfg->raw[i], wqcfg->raw[i]);
@@ -506,6 +509,7 @@ idxd_attach(struct spdk_pci_device *device)
 	struct spdk_idxd_device *idxd;
 	uint16_t did = device->id.device_id;
 	uint32_t cmd_reg;
+	uint64_t updated = sizeof(struct iaa_aecs);
 	int rc;
 
 	user_idxd = calloc(1, sizeof(struct spdk_user_idxd_device));
@@ -526,6 +530,14 @@ idxd_attach(struct spdk_pci_device *device)
 			SPDK_ERRLOG("Failed to allocate iaa aecs\n");
 			goto err;
 		}
+
+		idxd->aecs_addr = spdk_vtophys((void *)idxd->aecs, &updated);
+		if (idxd->aecs_addr == SPDK_VTOPHYS_ERROR || updated < sizeof(struct iaa_aecs)) {
+			SPDK_ERRLOG("Failed to translate iaa aecs\n");
+			spdk_free(idxd->aecs);
+			goto err;
+		}
+
 		/* Configure aecs table using fixed Huffman table */
 		idxd->aecs->output_accum[0] = DYNAMIC_HDR | 1;
 		idxd->aecs->num_output_accum_bits = DYNAMIC_HDR_SIZE;

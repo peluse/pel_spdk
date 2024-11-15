@@ -1,5 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2019 Intel Corporation.
+ *   Copyright (c) 2022 NVIDIA CORPORATION & AFFILIATES.
  *   All rights reserved.
  */
 
@@ -12,6 +13,9 @@
 #include "spdk/bdev_zone.h"
 
 #include "spdk/log.h"
+
+/* This namespace UUID was generated using uuid_generate() method. */
+#define BDEV_ZONE_BLOCK_NAMESPACE_UUID "5f3f485a-d6bb-4443-9de7-023683b77389"
 
 static int zone_block_init(void);
 static int zone_block_get_ctx_size(void);
@@ -416,18 +420,11 @@ zone_block_write(struct bdev_zone_block *bdev_node, struct zone_block_io_channel
 	}
 	pthread_spin_unlock(&zone->lock);
 
-	if (bdev_io->u.bdev.md_buf == NULL) {
-		rc = spdk_bdev_writev_blocks(bdev_node->base_desc, ch->base_ch, bdev_io->u.bdev.iovs,
-					     bdev_io->u.bdev.iovcnt, lba,
-					     bdev_io->u.bdev.num_blocks, _zone_block_complete_write,
-					     bdev_io);
-	} else {
-		rc = spdk_bdev_writev_blocks_with_md(bdev_node->base_desc, ch->base_ch,
-						     bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
-						     bdev_io->u.bdev.md_buf,
-						     lba, bdev_io->u.bdev.num_blocks,
-						     _zone_block_complete_write, bdev_io);
-	}
+	rc = spdk_bdev_writev_blocks_with_md(bdev_node->base_desc, ch->base_ch,
+					     bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
+					     bdev_io->u.bdev.md_buf,
+					     lba, bdev_io->u.bdev.num_blocks,
+					     _zone_block_complete_write, bdev_io);
 
 	return rc;
 
@@ -469,18 +466,11 @@ zone_block_read(struct bdev_zone_block *bdev_node, struct zone_block_io_channel 
 		return -EINVAL;
 	}
 
-	if (bdev_io->u.bdev.md_buf == NULL) {
-		rc = spdk_bdev_readv_blocks(bdev_node->base_desc, ch->base_ch, bdev_io->u.bdev.iovs,
-					    bdev_io->u.bdev.iovcnt, lba,
-					    len, _zone_block_complete_read,
-					    bdev_io);
-	} else {
-		rc = spdk_bdev_readv_blocks_with_md(bdev_node->base_desc, ch->base_ch,
-						    bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
-						    bdev_io->u.bdev.md_buf,
-						    lba, len,
-						    _zone_block_complete_read, bdev_io);
-	}
+	rc = spdk_bdev_readv_blocks_with_md(bdev_node->base_desc, ch->base_ch,
+					    bdev_io->u.bdev.iovs, bdev_io->u.bdev.iovcnt,
+					    bdev_io->u.bdev.md_buf,
+					    lba, len,
+					    _zone_block_complete_read, bdev_io);
 
 	return rc;
 }
@@ -702,8 +692,11 @@ zone_block_register(const char *base_bdev_name)
 	struct spdk_bdev *base_bdev;
 	struct bdev_zone_block_config *name, *tmp;
 	struct bdev_zone_block *bdev_node;
+	struct spdk_uuid ns_uuid;
 	uint64_t zone_size;
 	int rc = 0;
+
+	spdk_uuid_parse(&ns_uuid, BDEV_ZONE_BLOCK_NAMESPACE_UUID);
 
 	/* Check our list of names from config versus this bdev and if
 	 * there's a match, create the bdev_node & bdev accordingly.
@@ -787,11 +780,20 @@ zone_block_register(const char *base_bdev_name)
 		bdev_node->bdev.dif_type = base_bdev->dif_type;
 		bdev_node->bdev.dif_is_head_of_md = base_bdev->dif_is_head_of_md;
 		bdev_node->bdev.dif_check_flags = base_bdev->dif_check_flags;
+		bdev_node->bdev.dif_pi_format = base_bdev->dif_pi_format;
 
 		bdev_node->bdev.zoned = true;
 		bdev_node->bdev.ctxt = bdev_node;
 		bdev_node->bdev.fn_table = &zone_block_fn_table;
 		bdev_node->bdev.module = &bdev_zoned_if;
+
+		/* Generate UUID based on namespace UUID + base bdev UUID. */
+		rc = spdk_uuid_generate_sha1(&bdev_node->bdev.uuid, &ns_uuid,
+					     (const char *)&base_bdev->uuid, sizeof(struct spdk_uuid));
+		if (rc) {
+			SPDK_ERRLOG("Unable to generate new UUID for zone block bdev\n");
+			goto uuid_generation_failed;
+		}
 
 		/* bdev specific info */
 		bdev_node->bdev.zone_size = zone_size;
@@ -835,6 +837,7 @@ claim_failed:
 	TAILQ_REMOVE(&g_bdev_nodes, bdev_node, link);
 	spdk_io_device_unregister(bdev_node, NULL);
 zone_info_failed:
+uuid_generation_failed:
 	free(bdev_node->zones);
 calloc_failed:
 roundup_failed:

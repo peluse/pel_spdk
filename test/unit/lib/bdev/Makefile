@@ -1,5 +1,5 @@
 #  SPDX-License-Identifier: BSD-3-Clause
-#  Copyright (c) Intel Corporation.
+#  Copyright (C) 2015 Intel Corporation.
 #  All rights reserved.
 #
 
@@ -11,9 +11,7 @@ DIRS-y = bdev.c part.c scsi_nvme.c gpt vbdev_lvol.c mt raid bdev_zone.c vbdev_zo
 DIRS-$(CONFIG_CRYPTO) += crypto.c
 
 # enable once new mocks are added for compressdev
-DIRS-$(CONFIG_REDUCE) += compress.c
-
-DIRS-$(CONFIG_PMDK) += pmem
+DIRS-$(CONFIG_VBDEV_COMPRESS) += compress.c
 
 .PHONY: all clean $(DIRS-y)
 

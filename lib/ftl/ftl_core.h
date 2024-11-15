@@ -1,5 +1,5 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2018 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -23,8 +23,10 @@
 #include "ftl_layout.h"
 #include "ftl_sb.h"
 #include "ftl_l2p.h"
+#include "base/ftl_base_dev.h"
 #include "utils/ftl_bitmap.h"
 #include "utils/ftl_log.h"
+#include "utils/ftl_property.h"
 
 /*
  * We need to reserve at least 2 buffers for band close / open sequence
@@ -38,6 +40,8 @@
 #define FTL_ZERO_BUFFER_SIZE 0x100000
 extern void *g_ftl_write_buf;
 extern void *g_ftl_read_buf;
+
+struct ftl_layout_tracker_bdev;
 
 struct spdk_ftl_dev {
 	/* Configuration */
@@ -58,6 +62,9 @@ struct spdk_ftl_dev {
 
 	/* Underlying device */
 	struct spdk_bdev_desc		*base_bdev_desc;
+
+	/* Base device type */
+	const struct ftl_base_device_type *base_type;
 
 	/* Cached properties of the underlying device */
 	uint64_t			num_blocks_in_band;
@@ -159,13 +166,14 @@ struct spdk_ftl_dev {
 	TAILQ_HEAD(, ftl_io)		wr_sq;
 
 	/* Trim submission queue */
-	TAILQ_HEAD(, ftl_io)		unmap_sq;
+	TAILQ_HEAD(, ftl_io)		trim_sq;
 
 	/* Trim valid map */
-	struct ftl_bitmap		*unmap_map;
-	struct ftl_md			*unmap_map_md;
-	size_t				unmap_qd;
-	bool				unmap_in_progress;
+	struct ftl_bitmap		*trim_map;
+	struct ftl_md			*trim_map_md;
+	size_t				trim_qd;
+	bool				trim_in_progress;
+	struct ftl_md_io_entry_ctx	trim_md_io_entry_ctx;
 
 	/* Writer for user IOs */
 	struct ftl_writer		writer_user;
@@ -184,7 +192,23 @@ struct spdk_ftl_dev {
 		TAILQ_HEAD(, ftl_p2l_ckpt)	free;
 		/* In use regions */
 		TAILQ_HEAD(, ftl_p2l_ckpt)	inuse;
+
+		struct {
+			/* Free logs */
+			TAILQ_HEAD(, ftl_p2l_log)	free;
+			/* In use logs */
+			TAILQ_HEAD(, ftl_p2l_log)	inuse;
+		} log;
 	} p2l_ckpt;
+
+	/* MD layout region tracker for nvc device */
+	struct ftl_layout_tracker_bdev *nvc_layout_tracker;
+
+	/* MD layout region tracker for a base devics */
+	struct ftl_layout_tracker_bdev *base_layout_tracker;
+
+	/* FTL properties which can be configured by user */
+	struct ftl_properties			*properties;
 };
 
 void ftl_apply_limits(struct spdk_ftl_dev *dev);
@@ -201,8 +225,8 @@ bool ftl_needs_reloc(struct spdk_ftl_dev *dev);
 
 struct ftl_band *ftl_band_get_next_free(struct spdk_ftl_dev *dev);
 
-void ftl_set_unmap_map(struct spdk_ftl_dev *dev, uint64_t lba, uint64_t num_blocks,
-		       uint64_t seq_id);
+void ftl_set_trim_map(struct spdk_ftl_dev *dev, uint64_t lba, uint64_t num_blocks,
+		      uint64_t seq_id);
 
 void ftl_recover_max_seq(struct spdk_ftl_dev *dev);
 
@@ -211,8 +235,8 @@ void ftl_stats_bdev_io_completed(struct spdk_ftl_dev *dev, enum ftl_stats_type t
 
 void ftl_stats_crc_error(struct spdk_ftl_dev *dev, enum ftl_stats_type type);
 
-int ftl_unmap(struct spdk_ftl_dev *dev, struct ftl_io *io, struct spdk_io_channel *ch,
-	      uint64_t lba, size_t lba_cnt, spdk_ftl_fn cb_fn, void *cb_arg);
+int ftl_trim(struct spdk_ftl_dev *dev, struct ftl_io *io, struct spdk_io_channel *ch,
+	     uint64_t lba, size_t lba_cnt, spdk_ftl_fn cb_fn, void *cb_arg);
 
 static inline uint64_t
 ftl_get_num_blocks_in_band(const struct spdk_ftl_dev *dev)
@@ -231,6 +255,12 @@ static inline struct spdk_thread *
 ftl_get_core_thread(const struct spdk_ftl_dev *dev)
 {
 	return dev->core_thread;
+}
+
+static inline void
+ftl_add_io_activity(struct spdk_ftl_dev *dev)
+{
+	dev->stats.io_activity_total++;
 }
 
 static inline uint64_t

@@ -1,6 +1,6 @@
 /*   SPDX-License-Identifier: BSD-3-Clause
  *   Copyright (C) 2008-2012 Daisuke Aoyama <aoyama@peach.ne.jp>.
- *   Copyright (c) Intel Corporation.
+ *   Copyright (C) 2016 Intel Corporation.
  *   All rights reserved.
  */
 
@@ -153,6 +153,11 @@ iscsi_portal_open(struct spdk_iscsi_portal *p)
 	}
 
 	port = (int)strtol(p->port, NULL, 0);
+	if (port <= 0 || port > 65535) {
+		SPDK_ERRLOG("invalid port %s\n", p->port);
+		return -1;
+	}
+
 	sock = spdk_sock_listen(p->host, port, NULL);
 	if (sock == NULL) {
 		SPDK_ERRLOG("listen error %.64s.%d\n", p->host, port);
@@ -219,7 +224,7 @@ iscsi_parse_redirect_addr(struct sockaddr_storage *sa,
 	rc = getaddrinfo(host, port, &hints, &res);
 	if (rc != 0) {
 		SPDK_ERRLOG("getaddinrfo failed: %s (%d)\n", gai_strerror(rc), rc);
-		return -EINVAL;
+		return -(abs(rc));
 	}
 
 	if (res->ai_addrlen > sizeof(*sa)) {

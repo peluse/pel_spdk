@@ -1,3 +1,7 @@
+#  SPDX-License-Identifier: BSD-3-Clause
+#  Copyright (C) 2022 Intel Corporation.
+#  All rights reserved.
+
 import grpc
 import logging
 import uuid
@@ -19,12 +23,10 @@ class CryptoEngineBdev(crypto.CryptoEngine):
 
     def init(self, client, params):
         super().init(client, params)
-        driver = params.get('driver')
-        if driver is None:
-            raise ValueError('Crypto driver must be configured for bdev_crypto')
-        self._driver = driver
+        # _driver can be None
+        self._driver = params.get('driver')
 
-    def setup(self, volume_id, key, cipher, key2=None):
+    def setup(self, volume_id, key, cipher, key2=None, tweak_mode=None):
         try:
             with self._client() as client:
                 cipher = self._ciphers.get(cipher)
@@ -33,11 +35,16 @@ class CryptoEngineBdev(crypto.CryptoEngine):
                                                  'Invalid volume crypto configuration: bad cipher')
                 params = {'base_bdev_name': volume_id,
                           'name': str(uuid.uuid4()),
-                          'crypto_pmd': self._driver,
                           'key': key,
                           'cipher': cipher}
+                if self._driver is not None:
+                    params['crypto_pmd'] = self._driver
                 if key2 is not None:
                     params['key2'] = key2
+                if tweak_mode is not None and tweak_mode != sma_pb2.VolumeCryptoParameters.TWEAK_MODE_SIMPLE_LBA:
+                    raise crypto.CryptoException(grpc.StatusCode.INVALID_ARGUMENT,
+                                                 'Invalid volume crypto configuration: bad tweak_mode')
+
                 log.info('Creating crypto bdev: {} on volume: {}'.format(
                             params['name'], volume_id))
                 client.call('bdev_crypto_create', params)
@@ -59,7 +66,7 @@ class CryptoEngineBdev(crypto.CryptoEngine):
             raise crypto.CryptoException(grpc.StatusCode.INTERNAL,
                                          'Failed to delete crypto bdev')
 
-    def verify(self, volume_id, key, cipher, key2=None):
+    def verify(self, volume_id, key, cipher, key2=None, tweak_mode=None):
         crypto_bdev = self._get_crypto_bdev(volume_id)
         # Key being None/non-None defines whether we expect a bdev_crypto on top of a given volume
         if ((key is None and crypto_bdev is not None) or (key is not None and crypto_bdev is None)):
@@ -68,19 +75,29 @@ class CryptoEngineBdev(crypto.CryptoEngine):
         if key is None:
             return
         params = crypto_bdev['driver_specific']['crypto']
+        crypto_key = self._get_crypto_key(params['key_name'])
+        if crypto_key is None:
+            raise crypto.CryptoException(grpc.StatusCode.INVALID_ARGUMENT,
+                                         'No key object found')
         cipher = self._ciphers.get(cipher)
         if cipher is None:
             raise crypto.CryptoException(grpc.StatusCode.INVALID_ARGUMENT,
                                          'Invalid volume crypto configuration: bad cipher')
-        if params['cipher'].lower() != cipher.lower():
+        if crypto_key['cipher'].lower() != cipher.lower():
             raise crypto.CryptoException(grpc.StatusCode.INVALID_ARGUMENT,
                                          'Invalid volume crypto configuration: bad cipher')
-        if params['key'].lower() != key.lower():
+        if crypto_key['key'].lower() != key.lower():
             raise crypto.CryptoException(grpc.StatusCode.INVALID_ARGUMENT,
                                          'Invalid volume crypto configuration: bad key')
-        if key2 is not None and params.get('key2', '').lower() != key2.lower():
+        if key2 is not None and crypto_key.get('key2', '').lower() != key2.lower():
             raise crypto.CryptoException(grpc.StatusCode.INVALID_ARGUMENT,
                                          'Invalid volume crypto configuration: bad key2')
+        if crypto_key['name'].lower() != params['key_name'].lower():
+            raise crypto.CryptoException(grpc.StatusCode.INVALID_ARGUMENT,
+                                         'Invalid volume crypto configuration: key name does not match')
+        if tweak_mode is not None and tweak_mode != sma_pb2.VolumeCryptoParameters.TWEAK_MODE_SIMPLE_LBA:
+            raise crypto.CryptoException(grpc.StatusCode.INVALID_ARGUMENT,
+                                         'Invalid volume crypto configuration: bad tweak_mode')
 
     def _get_crypto_bdev(self, volume_id):
         try:
@@ -101,6 +118,16 @@ class CryptoEngineBdev(crypto.CryptoEngine):
         except JSONRPCException:
             raise crypto.CryptoException(grpc.StatusCode.INTERNAL,
                                          f'Failed to get bdev_crypto for volume: {volume_id}')
+
+    def _get_crypto_key(self, key_name):
+        try:
+            with self._client() as client:
+                _keys = client.call('accel_crypto_keys_get', {'key_name': key_name})
+                if _keys is not None:
+                    return _keys[0]
+                return None
+        except JSONRPCException:
+            pass
 
     def get_crypto_bdev(self, volume_id):
         bdev = self._get_crypto_bdev(volume_id)
